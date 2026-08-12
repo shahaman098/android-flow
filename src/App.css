@@ -1,0 +1,457 @@
+:root {
+  color-scheme: light;
+  --bg: #12161c;
+  --panel: #1a212b;
+  --text: #f4f1ea;
+  --muted: #9aa3b2;
+  --accent: #3dd6c6;
+  --accent-soft: rgba(61, 214, 198, 0.16);
+  --danger: #ff7b72;
+  --line: rgba(255, 255, 255, 0.08);
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  color: var(--text);
+  background: transparent;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+/* Side dock — always-on pill handle (idle outline → processing loader) */
+.dock {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.dock-pill {
+  width: 16px;
+  height: 72px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  background: linear-gradient(180deg, rgba(35, 46, 57, 0.98), rgba(9, 14, 21, 0.98));
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.9),
+    0 6px 20px rgba(0, 0, 0, 0.55),
+    0 0 16px rgba(61, 214, 198, 0.3);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.dock-pill::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(61, 214, 198, 0.9);
+  transform: translate(-50%, -50%);
+}
+
+.dock.recording .dock-pill {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: dock-pulse 1.2s ease-in-out infinite;
+}
+
+.dock.processing:not(.recording) .dock-pill {
+  border-color: rgba(240, 198, 116, 0.95);
+}
+
+.dock.error .dock-pill {
+  border-color: var(--danger);
+}
+
+.dock.error .dock-pill::after {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(255, 123, 114, 0.9);
+}
+
+.dock-loader {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: -40%;
+  height: 40%;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(240, 198, 116, 0.95),
+    transparent
+  );
+  animation: dock-load 1.05s ease-in-out infinite;
+}
+
+.dock.recording .dock-loader {
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(61, 214, 198, 0.95),
+    transparent
+  );
+}
+
+.dock-error-fill {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  background: rgba(255, 123, 114, 0.55);
+}
+
+/* Persistent indicator while a meeting is being transcribed — distinct from normal
+   dictation states so it stays legible even mid-recording. */
+.dock.meeting-active .dock-pill {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(255, 123, 114, 0.25);
+}
+
+.dock-meeting-dot {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  animation: dock-meeting-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes dock-meeting-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes dock-load {
+  0% {
+    top: -40%;
+  }
+  100% {
+    top: 100%;
+  }
+}
+
+@keyframes dock-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+
+/* Hub */
+.hub {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  height: 100%;
+  background: var(--bg);
+}
+
+aside {
+  border-right: 1px solid var(--line);
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #0e1218;
+}
+
+.hub-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px 16px;
+}
+
+.hub-brand span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.nav {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.nav.active,
+.nav:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+.nav.hide {
+  margin-top: auto;
+}
+
+main {
+  padding: 24px 28px;
+  overflow: auto;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ready-banner {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(240, 198, 116, 0.35);
+  background: rgba(240, 198, 116, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ready-banner.ok {
+  border-color: rgba(61, 214, 198, 0.35);
+  background: var(--accent-soft);
+}
+
+.ready-banner ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ready-banner span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.warning {
+  color: #f0c674;
+  font-size: 13px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin: 18px 0;
+}
+
+@media (min-width: 640px) {
+  .stats {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.stats div {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats strong {
+  font-size: 28px;
+}
+
+.stats span,
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.list li {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.list p {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.inline-form,
+.stack-form {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.stack-form {
+  flex-direction: column;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+input,
+textarea,
+select {
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.primary,
+.secondary {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.primary {
+  background: var(--accent);
+  color: #06221f;
+  font-weight: 700;
+}
+
+.secondary {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.chips {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chips li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.chips button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.style-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.style-card {
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.style-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.style-card.active {
+  border-color: rgba(61, 214, 198, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(61, 214, 198, 0.25);
+}
