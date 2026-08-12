@@ -267,6 +267,7 @@ pub fn begin_recording_session(app: &tauri::AppHandle, mode: &str) -> Result<(),
         }
     }
 
+    hide_hub_for_work(app);
     show_bubble(app);
 
     app.emit("recording-start", mode)
@@ -347,6 +348,7 @@ pub fn handle_vibe_refine(app: &tauri::AppHandle) {
     }
 
     show_bubble(app);
+    hide_hub_for_work(app);
     let _ = app.emit("session-mode", "vibe_refine");
     let _ = app.emit("dictation-status", "correcting");
 
@@ -373,6 +375,12 @@ fn show_hub_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn hide_hub_for_work(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
     }
 }
 
