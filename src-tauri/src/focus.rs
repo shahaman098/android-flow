@@ -311,6 +311,7 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
 }
 
 /// Keep the side dock visible above every app without activating Flow.
+/// Always re-anchors to the monitor under the mouse so multi-display setups work.
 pub fn show_bubble(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("bubble") {
         let _ = app.run_on_main_thread(move || {
@@ -318,7 +319,7 @@ pub fn show_bubble(app: &AppHandle) {
             let _ = window.set_always_on_top(true);
             let _ = window.set_visible_on_all_workspaces(true);
             let _ = window.set_ignore_cursor_events(true);
-            position_dock_default(&window);
+            position_dock_to_cursor_screen(&window);
             let _ = window.show();
 
             // Tauri's always-on-top maps to NSFloatingWindowLevel. Promote it only
@@ -358,18 +359,78 @@ pub fn hide_bubble(app: &AppHandle) {
     show_bubble(app);
 }
 
-/// Initial right-edge placement used once at app startup.
+/// Place the dock on the right edge of the monitor under the mouse cursor
+/// (falls back to the window's current / primary monitor).
+pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
+    let monitors = window
+        .available_monitors()
+        .ok()
+        .unwrap_or_default();
+    let cursor = cursor_screen_point();
+
+    let chosen = cursor
+        .and_then(|(cx, cy)| {
+            monitors.iter().find(|m| {
+                let pos = m.position();
+                let size = m.size();
+                let left = pos.x as f64;
+                let top = pos.y as f64;
+                let right = left + size.width as f64;
+                let bottom = top + size.height as f64;
+                cx >= left && cx < right && cy >= top && cy < bottom
+            })
+        })
+        .cloned()
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten());
+
+    let Some(monitor) = chosen else {
+        return;
+    };
+
+    let size = monitor.size();
+    let origin = monitor.position();
+    let scale = monitor.scale_factor();
+    let width = 48.0;
+    let height = 128.0;
+    let x = origin.x as f64 / scale + size.width as f64 / scale - width - 12.0;
+    let y = origin.y as f64 / scale + (size.height as f64 / scale - height) / 2.0;
+    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+}
+
+/// Initial right-edge placement — follows the cursor's screen when possible.
 pub fn position_dock_default(window: &WebviewWindow) {
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let size = monitor.size();
-        let origin = monitor.position();
-        let scale = monitor.scale_factor();
-        let width = 48.0;
-        let height = 128.0;
-        let x = origin.x as f64 / scale + size.width as f64 / scale - width - 12.0;
-        let y = origin.y as f64 / scale + (size.height as f64 / scale - height) / 2.0;
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+    position_dock_to_cursor_screen(window);
+}
+
+/// Global mouse location in top-left-origin physical pixels (Tauri monitor space).
+fn cursor_screen_point() -> Option<(f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSEvent;
+        // NSEvent::mouseLocation is bottom-left Cocoa coords across the virtual desktop.
+        let cocoa = NSEvent::mouseLocation();
+        // NSScreen::screens requires the AppKit main-thread marker (objc2-app-kit 0.3).
+        let mtm = MainThreadMarker::new()?;
+        let screens = objc2_app_kit::NSScreen::screens(mtm);
+        let mut max_height = 0.0_f64;
+        for screen in screens.iter() {
+            let frame = screen.frame();
+            let top = frame.origin.y + frame.size.height;
+            if top > max_height {
+                max_height = top;
+            }
+        }
+        // Convert Cocoa (bottom-left) → top-left for matching Tauri PhysicalPosition.
+        let x = cocoa.x;
+        let y = max_height - cocoa.y;
+        return Some((x, y));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
     }
 }
 

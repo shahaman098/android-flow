@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   currentMonitor,
+  cursorPosition,
   getCurrentWindow,
   LogicalPosition,
+  monitorFromPoint,
   primaryMonitor,
 } from "@tauri-apps/api/window";
 import type { MeetingStatus, Status } from "./lib/types";
@@ -24,9 +26,21 @@ const DOCK_WIDTH = 48;
 const DOCK_HEIGHT = 128;
 const DOCK_MARGIN = 12;
 
+/** Prefer the monitor under the mouse — so the pill follows you across screens. */
+async function monitorUnderCursor() {
+  try {
+    const cursor = await cursorPosition();
+    const hit = await monitorFromPoint(cursor.x, cursor.y);
+    if (hit) return hit;
+  } catch {
+    // Fall through if cursor APIs are unavailable.
+  }
+  return (await currentMonitor()) ?? (await primaryMonitor());
+}
+
 async function anchorDockToRightEdge(): Promise<void> {
   const win = getCurrentWindow();
-  const monitor = (await primaryMonitor()) ?? (await currentMonitor());
+  const monitor = await monitorUnderCursor();
   if (monitor) {
     const scale = monitor.scaleFactor;
     const screenX = monitor.position.x / scale;
@@ -42,6 +56,12 @@ async function anchorDockToRightEdge(): Promise<void> {
     if (Math.abs(currentX - targetX) > 1 || Math.abs(currentY - targetY) > 1) {
       await win.setPosition(new LogicalPosition(targetX, targetY));
     }
+  }
+  try {
+    await win.setAlwaysOnTop(true);
+    await win.setVisibleOnAllWorkspaces(true);
+  } catch {
+    // Overlay flags are best-effort.
   }
   if (!(await win.isVisible())) {
     await win.show();
@@ -83,7 +103,8 @@ export default function Bubble() {
     let unsubs: Array<() => void> = [];
     const keepAnchored = () => void anchorDockToRightEdge().catch(() => undefined);
     keepAnchored();
-    const anchorTimer = window.setInterval(keepAnchored, 5000);
+    // Follow the cursor's screen closely so the pill stays visible wherever you type.
+    const anchorTimer = window.setInterval(keepAnchored, 750);
 
     (async () => {
       try {
