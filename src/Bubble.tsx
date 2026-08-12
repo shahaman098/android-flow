@@ -22,9 +22,9 @@ function formatElapsed(startedAtEpochSecs: string | null): string {
 
 type Mode = "vibe" | "vibe_refine" | "dictate" | "command" | "prompt";
 
-const DOCK_WIDTH = 48;
-const DOCK_HEIGHT = 128;
-const DOCK_MARGIN = 12;
+const DOCK_WIDTH = 72;
+const DOCK_HEIGHT = 200;
+const DOCK_MARGIN = 28;
 
 /** Prefer the monitor under the mouse — so the pill follows you across screens. */
 async function monitorUnderCursor() {
@@ -57,12 +57,9 @@ async function anchorDockToRightEdge(): Promise<void> {
       await win.setPosition(new LogicalPosition(targetX, targetY));
     }
   }
-  try {
-    await win.setAlwaysOnTop(true);
-    await win.setVisibleOnAllWorkspaces(true);
-  } catch {
-    // Overlay flags are best-effort.
-  }
+  // Do NOT call setAlwaysOnTop / setVisibleOnAllWorkspaces from JS — those Tauri
+  // setters reset NSWindow level back to floating and the dock vanishes under Cursor.
+  // Rust configure_dock_overlay owns overlay level + Space joining.
   if (!(await win.isVisible())) {
     await win.show();
   }

@@ -24,17 +24,17 @@
         "resizable": true,
         "skipTaskbar": false,
         "center": true,
-        "visible": true,
-        "focus": true
+        "visible": false,
+        "focus": false
       },
       {
         "label": "bubble",
         "title": "Flow Dock",
-        "width": 48,
-        "height": 128,
+        "width": 72,
+        "height": 200,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "visibleOnAllWorkspaces": true,
         "resizable": false,
         "skipTaskbar": true,

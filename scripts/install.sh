@@ -53,6 +53,7 @@ if [[ -e "$DEST" ]]; then
   fi
   pkill -f "$DEST/Contents/MacOS/" 2>/dev/null || true
   sleep 1
+  chflags -R nouchg "$DEST" 2>/dev/null || true
   rm -rf "$DEST"
 fi
 

@@ -92,7 +92,7 @@ pub fn run() {
         .setup(|app| {
             // Regular (not Accessory) so Flow appears in the Dock / Cmd+Tab with a real Hub window.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(ActivationPolicy::Regular);
+            app.set_activation_policy(ActivationPolicy::Accessory);
 
             let show = MenuItem::with_id(app, "show", "Open Hub", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -145,20 +145,26 @@ pub fn run() {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
-                        // Closing Hub hides it; app keeps running via Dock / tray / hotkeys.
                         api.prevent_close();
                         focus::show_bubble(window_clone.app_handle());
                         let _ = window_clone.hide();
                     }
                 });
-
-                // Always open the Hub on launch — previously it hid when cloud was
-                // configured, which made the product look like it had no UI.
                 show_hub_window(app.handle());
             }
 
-            // Always-on side dock (pill indicator), fixed at the primary display's right edge.
             focus::show_bubble(app.handle());
+
+            #[cfg(target_os = "macos")]
+            {
+                let dock_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        focus::show_bubble(&dock_app);
+                    }
+                });
+            }
 
             Ok(())
         })

@@ -310,48 +310,64 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
     }
 }
 
+
+#[cfg(target_os = "macos")]
+fn schedule_dock_overlay_reassert(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let app = window.app_handle().clone();
+        let _ = app.run_on_main_thread(move || {
+            configure_dock_overlay(&window);
+            let _ = window.show();
+            configure_dock_overlay(&window);
+        });
+    });
+}
+
 /// Keep the side dock visible above every app without activating Flow.
-/// Always re-anchors to the monitor under the mouse so multi-display setups work.
 pub fn show_bubble(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("bubble") {
         let _ = app.run_on_main_thread(move || {
             let _ = window.set_focusable(false);
-            let _ = window.set_always_on_top(true);
-            let _ = window.set_visible_on_all_workspaces(true);
             let _ = window.set_ignore_cursor_events(true);
             position_dock_to_cursor_screen(&window);
             let _ = window.show();
-
-            // Tauri's always-on-top maps to NSFloatingWindowLevel. Promote it only
-            // after every Tauri setter so later show cycles cannot demote the dock.
             #[cfg(target_os = "macos")]
-            configure_dock_overlay(&window);
+            {
+                configure_dock_overlay(&window);
+                schedule_dock_overlay_reassert(window.clone());
+            }
         });
     }
 }
 
 #[cfg(target_os = "macos")]
 pub fn configure_dock_overlay(window: &WebviewWindow) {
-    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSStatusWindowLevel};
-
-    let Ok(ns_window) = window.ns_window() else {
-        return;
-    };
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+    let Ok(ns_window) = window.ns_window() else { return; };
     unsafe {
         let ns_window: &NSWindow = &*ns_window.cast();
-        let behavior = ns_window.collectionBehavior()
+        let behavior = (ns_window.collectionBehavior()
             | NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::CanJoinAllApplications
             | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary
-            | NSWindowCollectionBehavior::IgnoresCycle;
+            | NSWindowCollectionBehavior::IgnoresCycle)
+            & !NSWindowCollectionBehavior::Stationary;
         ns_window.setCollectionBehavior(behavior);
         ns_window.setHidesOnDeactivate(false);
         ns_window.setCanHide(false);
-        ns_window.setLevel(NSStatusWindowLevel);
+        ns_window.setAlphaValue(1.0);
+        ns_window.setLevel(101);
+        if !ns_window.isVisible() { ns_window.setIsVisible(true); }
         ns_window.orderFrontRegardless();
+        let bits = ns_window.collectionBehavior().bits();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/flow_dock_overlay.log") {
+            use std::io::Write;
+            let _ = writeln!(f, "SAFE_OVERLAY visible={} behavior={:#x}", ns_window.isVisible(), bits);
+        }
     }
 }
+
 
 /// Dock stays on screen while Flow is running (idle outline). Visibility is not toggled off.
 pub fn hide_bubble(app: &AppHandle) {
@@ -391,12 +407,14 @@ pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
     let size = monitor.size();
     let origin = monitor.position();
     let scale = monitor.scale_factor();
-    let width = 48.0;
-    let height = 128.0;
-    let x = origin.x as f64 / scale + size.width as f64 / scale - width - 12.0;
+    let width = 72.0;
+    let height = 200.0;
+    let x = origin.x as f64 / scale + size.width as f64 / scale - width - 28.0;
     let y = origin.y as f64 / scale + (size.height as f64 / scale - height) / 2.0;
     let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
     let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+    #[cfg(target_os = "macos")]
+    configure_dock_overlay(window);
 }
 
 /// Initial right-edge placement — follows the cursor's screen when possible.
