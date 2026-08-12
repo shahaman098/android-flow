@@ -21,6 +21,12 @@ fn main() {
 fn link_swift_runtime() {
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
 
+    // Some Swift-backed dependencies use @rpath for the concurrency runtime.
+    // Keep both the macOS runtime and bundled Frameworks paths explicit so a
+    // release cannot pass linking and then die in dyld at launch.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+
     let Some(developer_dir) = developer_dir() else {
         // No toolchain located — let the linker try on its own and report the real error.
         return;

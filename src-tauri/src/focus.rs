@@ -1,10 +1,23 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+
+/// True while paste is in progress — dock must not call orderFrontRegardless.
+static PASTING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_pasting(active: bool) {
+    PASTING.store(active, Ordering::SeqCst);
+}
+
+pub fn is_pasting() -> bool {
+    PASTING.load(Ordering::SeqCst)
+}
 
 #[derive(Clone, Debug)]
 pub struct TargetApp {
@@ -37,6 +50,12 @@ impl Default for RecordingFlag {
             active: Mutex::new(false),
         }
     }
+}
+
+#[derive(Clone, Serialize)]
+struct DictationFallbackPayload {
+    text: String,
+    message: String,
 }
 
 pub fn capture_frontmost_app(app: &AppHandle) -> Result<String, String> {
@@ -215,23 +234,52 @@ enum PasteRoute {
 }
 
 pub fn paste_into_target_app(app: &AppHandle, text: &str) -> Result<(), String> {
-    // Snapshot first: the paste routes below clobber the clipboard, and leaving the
-    // user's copied content destroyed after every dictation is the loudest way this
-    // diverges from Wispr Flow. Restored once the text has landed; deliberately left
-    // in place when the result is what the user still needs to paste.
-    let previous = app.clipboard().read_text().ok();
+    set_pasting(true);
+    let result = (|| {
+        // Snapshot first: the paste routes below clobber the clipboard.
+        let previous = app.clipboard().read_text().ok();
 
-    match paste_route(app, text)? {
-        PasteRoute::Retain => return Ok(()),
-        // Let the target app's Cmd+V land before we swap the pasteboard back.
-        PasteRoute::Clipboard => thread::sleep(Duration::from_millis(250)),
-        PasteRoute::Direct => {}
-    }
+        let route = match paste_route(app, text) {
+            Ok(route) => route,
+            Err(err) => {
+                emit_copy_fallback(app, text, &err);
+                return Err(err);
+            }
+        };
+        match route {
+            PasteRoute::Retain => {
+                let err = "Couldn't insert into the text field — result is on the clipboard (⌘V). Click the field in Cursor/WhatsApp first, and grant Flow Accessibility."
+                    .to_string();
+                emit_copy_fallback(app, text, &err);
+                return Err(err);
+            }
+            // Electron apps are unreliable — keep the transcript on the clipboard as
+            // backup instead of restoring the previous pasteboard.
+            PasteRoute::Clipboard => {
+                thread::sleep(Duration::from_millis(900));
+                return Ok(());
+            }
+            PasteRoute::Direct => thread::sleep(Duration::from_millis(80)),
+        }
 
-    if let Some(previous) = previous {
-        let _ = app.clipboard().write_text(previous);
-    }
-    Ok(())
+        if let Some(previous) = previous {
+            let _ = app.clipboard().write_text(previous);
+        }
+        Ok(())
+    })();
+    set_pasting(false);
+    result
+}
+
+fn emit_copy_fallback(app: &AppHandle, text: &str, message: &str) {
+    let _ = app.clipboard().write_text(text.to_string());
+    let _ = app.emit(
+        "dictation-fallback",
+        DictationFallbackPayload {
+            text: text.to_string(),
+            message: message.to_string(),
+        },
+    );
 }
 
 fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
@@ -243,21 +291,28 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
     {
         let stored = target_app(app).filter(|target| !is_flow_app(&target.name));
         let Some(target) = stored else {
-            // No target app — the prompt stays on the clipboard for the user to paste,
-            // so this must not restore over it.
+            // No target app — keep text on clipboard; caller turns this into a visible error.
             return Ok(PasteRoute::Retain);
         };
 
-        let activation_error = activate_target_pid(target.pid).err();
+        // Prefer pid activation — more reliable than app name for Electron (Cursor, WhatsApp).
+        let activation_error = activate_target_pid(target.pid)
+            .or_else(|_| activate_target_by_name(&target.name))
+            .err();
+        thread::sleep(Duration::from_millis(120));
 
         let prefers_paste = prefers_paste_first(&target.name);
         let mut ax_error = None;
         let mut paste_error = None;
 
         if prefers_paste {
-            match activate_and_paste(&target.name) {
+            match paste_into_pid(target.pid) {
                 Ok(()) => return Ok(PasteRoute::Clipboard),
                 Err(err) => paste_error = Some(err),
+            }
+            match activate_and_paste(&target.name) {
+                Ok(()) => return Ok(PasteRoute::Clipboard),
+                Err(err) => paste_error = paste_error.or(Some(err)),
             }
             match crate::macos_text::insert_text_into_focused_element(target.pid, text) {
                 Ok(()) => return Ok(PasteRoute::Direct),
@@ -268,9 +323,13 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
                 Ok(()) => return Ok(PasteRoute::Direct),
                 Err(err) => ax_error = Some(err),
             }
-            match activate_and_paste(&target.name) {
+            match paste_into_pid(target.pid) {
                 Ok(()) => return Ok(PasteRoute::Clipboard),
                 Err(err) => paste_error = Some(err),
+            }
+            match activate_and_paste(&target.name) {
+                Ok(()) => return Ok(PasteRoute::Clipboard),
+                Err(err) => paste_error = paste_error.or(Some(err)),
             }
         }
 
@@ -296,7 +355,7 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
                     .map(|msg| format!(" Paste fallback failed: {msg}"))
                     .unwrap_or_default();
                 Err(format!(
-                    "AX insertion, paste, and typed fallback all failed for '{}'. Text is on the clipboard (Cmd+V). {type_err}{activation_note}{ax_note}{paste_note}",
+                    "Couldn't insert into '{}'. Text is on the clipboard (⌘V). {type_err}{activation_note}{ax_note}{paste_note}",
                     target.name,
                 ))
             }
@@ -311,32 +370,49 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
 }
 
 
-#[cfg(target_os = "macos")]
-fn schedule_dock_overlay_reassert(window: WebviewWindow) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let app = window.app_handle().clone();
-        let _ = app.run_on_main_thread(move || {
-            configure_dock_overlay(&window);
-            let _ = window.show();
-            configure_dock_overlay(&window);
-        });
-    });
-}
-
 /// Keep the side dock visible above every app without activating Flow.
 pub fn show_bubble(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("bubble") {
         let _ = app.run_on_main_thread(move || {
             let _ = window.set_focusable(false);
-            let _ = window.set_ignore_cursor_events(true);
+            // Click-through is owned by Bubble.tsx (idle = through, expanded = interactive).
+            // Do not force ignore_cursor_events here — the 2s keepalive would steal Stop/Cancel.
             position_dock_to_cursor_screen(&window);
             let _ = window.show();
             #[cfg(target_os = "macos")]
             {
                 configure_dock_overlay(&window);
-                schedule_dock_overlay_reassert(window.clone());
             }
+        });
+    }
+}
+
+/// Change the bar between its passive idle capsule and interactive recording controls.
+/// Native code owns the entire window layout so React never races AppKit.
+pub fn set_bubble_expanded(app: &AppHandle, expanded: bool) {
+    set_bubble_layout(app, if expanded { "listening" } else { "idle" });
+}
+
+/// Keep the dock as small as possible unless the user needs interactive controls.
+pub fn set_bubble_layout(app: &AppHandle, layout: &str) {
+    if let Some(window) = app.get_webview_window("bubble") {
+        let layout = layout.to_string();
+        let _ = app.run_on_main_thread(move || {
+            let (width, height, interactive) = match layout.as_str() {
+                "listening" => (76.0, 304.0, true),
+                "fallback" => (112.0, 44.0, true),
+                _ => (60.0, 120.0, false),
+            };
+            let _ = window.set_focusable(false);
+            let _ = window.set_ignore_cursor_events(!interactive);
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width,
+                height,
+            }));
+            position_dock_to_cursor_screen(&window);
+            let _ = window.show();
+            #[cfg(target_os = "macos")]
+            configure_dock_overlay(&window);
         });
     }
 }
@@ -359,11 +435,9 @@ pub fn configure_dock_overlay(window: &WebviewWindow) {
         ns_window.setAlphaValue(1.0);
         ns_window.setLevel(101);
         if !ns_window.isVisible() { ns_window.setIsVisible(true); }
-        ns_window.orderFrontRegardless();
-        let bits = ns_window.collectionBehavior().bits();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/flow_dock_overlay.log") {
-            use std::io::Write;
-            let _ = writeln!(f, "SAFE_OVERLAY visible={} behavior={:#x}", ns_window.isVisible(), bits);
+        // Never steal focus during paste — orderFrontRegardless was racing Cmd+V.
+        if !is_pasting() {
+            ns_window.orderFrontRegardless();
         }
     }
 }
@@ -375,27 +449,23 @@ pub fn hide_bubble(app: &AppHandle) {
     show_bubble(app);
 }
 
-/// Place the dock on the right edge of the monitor under the mouse cursor
-/// (falls back to the window's current / primary monitor).
+/// Place the dock on the right edge of the monitor containing the active work
+/// window. Falls back to cursor/current/primary monitor when AX bounds are absent.
 pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
     let monitors = window
         .available_monitors()
         .ok()
         .unwrap_or_default();
+    let frontmost_bounds = frontmost_app()
+        .ok()
+        .filter(|target| !is_flow_app(&target.name))
+        .and_then(|target| front_window_bounds_for_pid(target.pid).ok());
     let cursor = cursor_screen_point();
 
-    let chosen = cursor
-        .and_then(|(cx, cy)| {
-            monitors.iter().find(|m| {
-                let pos = m.position();
-                let size = m.size();
-                let left = pos.x as f64;
-                let top = pos.y as f64;
-                let right = left + size.width as f64;
-                let bottom = top + size.height as f64;
-                cx >= left && cx < right && cy >= top && cy < bottom
-            })
-        })
+    let chosen = frontmost_bounds
+        .as_ref()
+        .and_then(|bounds| monitor_containing_point(&monitors, bounds.center_x, bounds.center_y))
+        .or_else(|| cursor.and_then(|(cx, cy)| monitor_containing_point(&monitors, cx, cy)))
         .cloned()
         .or_else(|| window.current_monitor().ok().flatten())
         .or_else(|| window.primary_monitor().ok().flatten());
@@ -407,17 +477,64 @@ pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
     let size = monitor.size();
     let origin = monitor.position();
     let scale = monitor.scale_factor();
-    let width = 72.0;
-    let height = 200.0;
+    // Prefer the window's current logical size (Bubble expands/collapses).
+    let mut width = 60.0;
+    let mut height = 120.0;
+    if let Ok(outer) = window.outer_size() {
+        width = outer.width as f64 / scale;
+        height = outer.height as f64 / scale;
+    }
+    if width < 20.0 || height < 20.0 {
+        width = 60.0;
+        height = 120.0;
+    }
     let x = origin.x as f64 / scale + size.width as f64 / scale - width - 28.0;
     let y = origin.y as f64 / scale + (size.height as f64 / scale - height) / 2.0;
-    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    // Do not reset size here — Bubble owns idle vs expanded dimensions.
     let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     #[cfg(target_os = "macos")]
     configure_dock_overlay(window);
 }
 
-/// Initial right-edge placement — follows the cursor's screen when possible.
+fn monitor_containing_point<'a>(
+    monitors: &'a [tauri::Monitor],
+    x: f64,
+    y: f64,
+) -> Option<&'a tauri::Monitor> {
+    monitors.iter().find(|m| {
+        let pos = m.position();
+        let size = m.size();
+        let left = pos.x as f64;
+        let top = pos.y as f64;
+        let right = left + size.width as f64;
+        let bottom = top + size.height as f64;
+        x >= left && x < right && y >= top && y < bottom
+    })
+}
+
+#[derive(Clone, Copy)]
+struct FrontWindowBounds {
+    center_x: f64,
+    center_y: f64,
+}
+
+fn front_window_bounds_for_pid(pid: i32) -> Result<FrontWindowBounds, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (x, y, w, h) = crate::macos_text::front_window_bounds(pid)?;
+        return Ok(FrontWindowBounds {
+            center_x: x + w / 2.0,
+            center_y: y + h / 2.0,
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        Err("Front window bounds are only available on macOS.".into())
+    }
+}
+
+/// Initial right-edge placement — follows the active work window when possible.
 pub fn position_dock_default(window: &WebviewWindow) {
     position_dock_to_cursor_screen(window);
 }
@@ -465,6 +582,12 @@ pub fn frontmost_app_name() -> Result<String, String> {
 }
 
 pub fn frontmost_app() -> Result<TargetApp, String> {
+    // Prefer NSWorkspace — fast, no AppleScript, works before Accessibility is granted
+    // for System Events (still need AX for paste, but capture itself is reliable).
+    if let Some(target) = frontmost_app_nsworkspace() {
+        return Ok(target);
+    }
+
     let output = Command::new("osascript")
         .args([
             "-e",
@@ -493,6 +616,27 @@ pub fn frontmost_app() -> Result<TargetApp, String> {
     Ok(TargetApp { name, pid })
 }
 
+#[cfg(target_os = "macos")]
+fn frontmost_app_nsworkspace() -> Option<TargetApp> {
+    use objc2_app_kit::NSWorkspace;
+    let workspace = NSWorkspace::sharedWorkspace();
+    let app = workspace.frontmostApplication()?;
+    let name = app.localizedName()?.to_string();
+    let pid = app.processIdentifier();
+    if name.is_empty() || pid <= 0 {
+        return None;
+    }
+    Some(TargetApp {
+        name,
+        pid: pid as i32,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frontmost_app_nsworkspace() -> Option<TargetApp> {
+    None
+}
+
 fn activate_target_pid(pid: i32) -> Result<(), String> {
     let script = format!(
         r#"tell application "System Events" to set frontmost of (first application process whose unix id is {pid}) to true"#
@@ -505,7 +649,75 @@ fn activate_target_pid(pid: i32) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Could not reactivate target app by pid {pid}. {stderr}"));
     }
-    thread::sleep(Duration::from_millis(60));
+    Ok(())
+}
+
+fn activate_target_by_name(app_name: &str) -> Result<(), String> {
+    let escaped = escape_applescript_string(app_name);
+    let script = format!(r#"tell application "{escaped}" to activate"#);
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("Could not activate '{app_name}': {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Could not activate '{app_name}'. {stderr}"));
+    }
+    Ok(())
+}
+
+/// Soft-refocus Electron composers (Cursor chat, WhatsApp) by clicking near the
+/// bottom-center of the front window, then paste with Cmd+V.
+/// Hard AX focus gates are skipped — Cursor often reports no focused field after
+/// a long STT round-trip even when the chat input is visible.
+fn paste_into_pid(pid: i32) -> Result<(), String> {
+    let script = format!(
+        r#"
+tell application "System Events"
+  set frontmost of (first application process whose unix id is {pid}) to true
+end tell
+delay 0.12
+"#
+    );
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("Paste by pid failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Could not focus pid {pid}. Grant Accessibility permission to Flow. {stderr}"
+        ));
+    }
+
+    // Cursor/WhatsApp lose the text-field focus during cloud processing.
+    // Click the lower composer area, then send Cmd+V.
+    let _ = crate::macos_text::click_composer_area(pid);
+    thread::sleep(Duration::from_millis(140));
+
+    if crate::macos_text::has_focused_input_target(pid).is_err() {
+        // Second chance click a bit higher (some layouts put the input above the dock).
+        let _ = crate::macos_text::click_composer_area_offset(pid, 0.5, 0.82);
+        thread::sleep(Duration::from_millis(120));
+    }
+    crate::macos_text::has_focused_input_target(pid)?;
+
+    if let Err(err) = crate::macos_text::post_command_v() {
+        // Fall back to System Events if CGEvent is blocked.
+        let paste = Command::new("osascript")
+            .args([
+                "-e",
+                r#"tell application "System Events" to keystroke "v" using command down"#,
+            ])
+            .output()
+            .map_err(|e| format!("Paste keystroke failed: {e}"))?;
+        if !paste.status.success() {
+            let stderr = String::from_utf8_lossy(&paste.stderr);
+            return Err(format!(
+                "Paste into pid {pid} failed ({err}). Grant Accessibility. {stderr}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -538,8 +750,7 @@ fn activate_and_paste(app_name: &str) -> Result<(), String> {
     let script = format!(
         r#"
 tell application "{escaped}" to activate
-delay 0.08
-tell application "System Events" to keystroke "v" using command down
+delay 0.12
 "#
     );
 
@@ -551,8 +762,31 @@ tell application "System Events" to keystroke "v" using command down
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "Paste into '{app_name}' failed. Grant Accessibility permission to Flow. Text is on the clipboard (⌘V). {stderr}"
+            "Activate '{app_name}' failed. Grant Accessibility permission to Flow. {stderr}"
         ));
+    }
+
+    if let Ok(target) = frontmost_app() {
+        if !is_flow_app(&target.name) {
+            let _ = crate::macos_text::click_composer_area(target.pid);
+            thread::sleep(Duration::from_millis(120));
+        }
+    }
+
+    if crate::macos_text::post_command_v().is_err() {
+        let paste = Command::new("osascript")
+            .args([
+                "-e",
+                r#"tell application "System Events" to keystroke "v" using command down"#,
+            ])
+            .output()
+            .map_err(|e| format!("Paste keystroke failed: {e}"))?;
+        if !paste.status.success() {
+            let stderr = String::from_utf8_lossy(&paste.stderr);
+            return Err(format!(
+                "Paste into '{app_name}' failed. Text is on the clipboard (⌘V). {stderr}"
+            ));
+        }
     }
 
     Ok(())

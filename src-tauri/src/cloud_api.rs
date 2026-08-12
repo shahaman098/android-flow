@@ -50,7 +50,7 @@ fn cloud_client() -> Result<reqwest::Client, String> {
         // to transport quirks than a tiny health probe. Keep the request alive longer
         // and prefer HTTP/1.1 over HTTP/2 stream behavior for stability.
         .connect_timeout(Duration::from_secs(12))
-        .timeout(Duration::from_secs(540))
+        .timeout(Duration::from_secs(120))
         .tcp_keepalive(Duration::from_secs(30))
         .http1_only()
         .user_agent("Flow.app/0.1 cloud-client")

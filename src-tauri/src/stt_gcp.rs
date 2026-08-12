@@ -119,8 +119,7 @@ pub async fn transcribe(config: &AppConfig, audio_bytes: Vec<u8>) -> Result<Stri
         "content": content
     });
 
-    let client = reqwest::Client::new();
-    let response = client
+    let response = speech_client()
         .post(&url)
         .bearer_auth(&token)
         .json(&body)
@@ -180,8 +179,7 @@ pub async fn verify_speech(config: &AppConfig) -> Result<String, String> {
     let url = format!(
         "https://{location}-speech.googleapis.com/v2/projects/{project}/locations/{location}/recognizers?pageSize=1"
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = speech_client()
         .get(&url)
         .bearer_auth(&token)
         .send()
@@ -204,4 +202,17 @@ pub async fn verify_speech(config: &AppConfig) -> Result<String, String> {
             config.stt_model.trim()
         }
     ))
+}
+
+fn speech_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .user_agent("Flow.app/0.1 gcp-speech-client")
+            .build()
+            .expect("GCP Speech HTTP client should build")
+    })
 }

@@ -36,8 +36,8 @@ select {
   font: inherit;
 }
 
-/* Side dock — always-on pill handle (idle outline → processing loader) */
-.dock {
+/* Flow Bar — vertical frosted pill (mic → wave → cancel → stop) */
+.flow-bar {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -50,104 +50,303 @@ select {
   -webkit-user-select: none;
 }
 
-.dock-pill {
-  width: 28px;
-  height: 120px;
-  border-radius: 999px;
-  border: 3px solid #ffffff;
-  background: linear-gradient(180deg, #2a3644 0%, #0b1018 100%);
+.flow-bar-shell {
   position: relative;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 46px;
+  height: 102px;
+  padding: 8px 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  background:
+    radial-gradient(circle at 50% 18%, rgba(138, 197, 255, 0.1), transparent 34%),
+    linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.56) 0%,
+      rgba(249, 250, 252, 0.32) 44%,
+      rgba(235, 238, 244, 0.42) 100%
+    );
+  backdrop-filter: blur(20px) saturate(145%);
+  -webkit-backdrop-filter: blur(20px) saturate(145%);
   box-shadow:
-    0 0 0 2px rgba(0, 0, 0, 0.85),
-    0 8px 28px rgba(0, 0, 0, 0.65),
-    0 0 28px rgba(61, 214, 198, 0.75),
-    0 0 48px rgba(61, 214, 198, 0.35);
-  transition: border-color 160ms ease, box-shadow 160ms ease;
-  animation: dock-idle-glow 2.4s ease-in-out infinite;
+    0 1px 0 rgba(255, 255, 255, 0.62) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset,
+    0 8px 18px rgba(0, 0, 0, 0.14),
+    0 1px 4px rgba(0, 0, 0, 0.08),
+    0 0 10px rgba(100, 178, 255, 0.1);
+  transition:
+    width 160ms ease,
+    height 160ms ease,
+    gap 160ms ease,
+    box-shadow 160ms ease;
 }
 
-.dock-pill::after {
+.flow-bar.state-listening .flow-bar-shell {
+  width: 64px;
+  height: 286px;
+  gap: 14px;
+  padding: 14px 0;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.72) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.05) inset,
+    0 12px 26px rgba(0, 0, 0, 0.2),
+    0 0 18px rgba(47, 128, 255, 0.16);
+}
+
+.flow-bar.state-processing .flow-bar-shell {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.72) inset,
+    0 8px 18px rgba(0, 0, 0, 0.14),
+    0 0 14px rgba(240, 198, 116, 0.18);
+}
+
+.flow-bar.state-fallback .flow-bar-shell {
+  width: 104px;
+  height: 38px;
+  padding: 0 4px;
+  border-color: rgba(47, 128, 255, 0.36);
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.72), rgba(236, 245, 255, 0.54));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.72) inset,
+    0 6px 14px rgba(0, 0, 0, 0.12),
+    0 0 12px rgba(47, 128, 255, 0.12);
+}
+
+.flow-bar.state-error .flow-bar-shell {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.64) inset,
+    0 8px 18px rgba(0, 0, 0, 0.16),
+    0 0 12px rgba(255, 80, 80, 0.22);
+}
+
+.flow-bar-idle-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.flow-bar-mic {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(116, 187, 255, 0.58);
+  background:
+    radial-gradient(circle at 50% 28%, rgba(255, 255, 255, 0.72), rgba(240, 247, 255, 0.46) 56%, rgba(216, 235, 255, 0.4)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.64), rgba(221, 236, 255, 0.46));
+  color: #2f80ff;
+  flex-shrink: 0;
+  box-shadow:
+    0 0 0 2px rgba(95, 177, 255, 0.1),
+    0 0 12px rgba(62, 154, 255, 0.22),
+    0 4px 9px rgba(52, 116, 204, 0.12),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+.flow-bar-mic.listening::before {
   content: "";
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 8px;
-  height: 48px;
+  inset: -3px;
   border-radius: 999px;
-  background: #5ff0e0;
-  box-shadow: 0 0 14px rgba(95, 240, 224, 1), 0 0 28px rgba(61, 214, 198, 0.9);
-  transform: translate(-50%, -50%);
-}
-
-.dock.recording .dock-pill {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  animation: dock-pulse 1.2s ease-in-out infinite;
-}
-
-.dock.processing:not(.recording) .dock-pill {
-  border-color: rgba(240, 198, 116, 0.95);
-}
-
-.dock.error .dock-pill {
-  border-color: var(--danger);
-}
-
-.dock.error .dock-pill::after {
-  background: var(--danger);
-  box-shadow: 0 0 8px rgba(255, 123, 114, 0.9);
-}
-
-.dock-loader {
-  position: absolute;
-  left: 1px;
-  right: 1px;
-  top: -40%;
-  height: 40%;
-  border-radius: inherit;
-  background: linear-gradient(
-    180deg,
-    transparent,
-    rgba(240, 198, 116, 0.95),
-    transparent
+  background: radial-gradient(
+    circle,
+    rgba(47, 128, 255, 0.45) 0%,
+    rgba(47, 128, 255, 0.12) 55%,
+    transparent 72%
   );
-  animation: dock-load 1.05s ease-in-out infinite;
+  pointer-events: none;
 }
 
-.dock.recording .dock-loader {
-  background: linear-gradient(
-    180deg,
-    transparent,
-    rgba(61, 214, 198, 0.95),
-    transparent
+.flow-bar-mic.listening {
+  filter: drop-shadow(0 0 8px rgba(47, 128, 255, 0.48));
+}
+
+.flow-bar-mic.processing {
+  border-color: rgba(235, 195, 112, 0.72);
+  color: #c9a24a;
+  box-shadow:
+    0 0 0 2px rgba(240, 198, 116, 0.1),
+    0 0 12px rgba(240, 198, 116, 0.24),
+    0 4px 9px rgba(138, 98, 32, 0.1),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+.flow-bar-mic-icon {
+  position: relative;
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.flow-bar-error-bang {
+  color: #ff4d4d;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.flow-bar-wave {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 36px;
+  height: 98px;
+  flex: 1 1 auto;
+  filter: drop-shadow(0 0 9px rgba(47, 128, 255, 0.34));
+}
+
+.flow-bar-wave::before {
+  content: "";
+  position: absolute;
+  inset: -6px -10px;
+  border-radius: 999px;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(47, 128, 255, 0.2) 0%,
+    rgba(47, 128, 255, 0.07) 55%,
+    transparent 75%
   );
+  pointer-events: none;
 }
 
-.dock-error-fill {
+.flow-bar-wave-bar {
+  display: block;
+  position: relative;
+  height: 3px;
+  min-width: 10px;
+  max-width: 100%;
+  align-self: center;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(228, 240, 255, 0.74) 0%, #ffffff 45%, rgba(228, 240, 255, 0.74) 100%);
+  box-shadow: 0 0 7px rgba(255, 255, 255, 0.95);
+  transition: width 60ms linear;
+}
+
+.flow-bar-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(210, 216, 225, 0.9);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(238, 241, 246, 0.86));
+  color: #6b7280;
+  font-size: 23px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow:
+    0 8px 16px rgba(0, 0, 0, 0.1),
+    0 1px 0 rgba(255, 255, 255, 0.92) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.04) inset;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.flow-bar-btn:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(239, 243, 249, 0.92));
+}
+
+.flow-bar-btn:active {
+  transform: scale(0.94);
+}
+
+.flow-bar-btn.cancel {
+  font-size: 24px;
+  font-weight: 400;
+  color: #7b8494;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.flow-bar-btn.stop {
+  border-color: rgba(255, 219, 222, 0.98);
+  background:
+    radial-gradient(circle at 50% 30%, rgba(255, 255, 255, 0.98), rgba(255, 239, 241, 0.82) 62%, rgba(255, 231, 235, 0.82)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 233, 237, 0.9));
+  box-shadow:
+    0 8px 18px rgba(115, 32, 42, 0.12),
+    0 0 18px rgba(255, 70, 70, 0.18),
+    0 1px 0 rgba(255, 255, 255, 0.98) inset;
+}
+
+.flow-bar-stop-sq {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: #ff4d57;
+  box-shadow: 0 0 8px rgba(255, 77, 87, 0.34);
+}
+
+.flow-bar-spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid rgba(201, 162, 74, 0.22);
+  border-top-color: rgba(201, 162, 74, 0.95);
+  animation: flow-bar-spin 0.75s linear infinite;
+}
+
+.flow-bar-copy-pill {
+  width: 92px;
+  height: 30px;
+  border: 1px solid rgba(47, 128, 255, 0.38);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(227, 240, 255, 0.78));
+  color: #2f80ff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 3px 8px rgba(47, 128, 255, 0.12);
+}
+
+.flow-bar-copy-pill:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(219, 235, 255, 0.86));
+}
+
+.flow-bar.meeting-active .flow-bar-shell {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.64) inset,
+    0 8px 18px rgba(0, 0, 0, 0.16),
+    0 0 12px rgba(255, 80, 80, 0.22);
+}
+
+.flow-bar-meeting-dot {
   position: absolute;
-  inset: 2px;
-  border-radius: inherit;
-  background: rgba(255, 123, 114, 0.55);
-}
-
-/* Persistent indicator while a meeting is being transcribed — distinct from normal
-   dictation states so it stays legible even mid-recording. */
-.dock.meeting-active .dock-pill {
-  border-color: var(--danger);
-  box-shadow: 0 0 0 3px rgba(255, 123, 114, 0.25);
-}
-
-.dock-meeting-dot {
-  position: absolute;
-  top: 4px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 8px;
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--danger);
+  background: #ff3b30;
   animation: dock-meeting-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes flow-bar-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes dock-meeting-pulse {
@@ -160,42 +359,6 @@ select {
   }
 }
 
-@keyframes dock-load {
-  0% {
-    top: -40%;
-  }
-  100% {
-    top: 100%;
-  }
-}
-
-@keyframes dock-pulse {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.06);
-  }
-}
-
-@keyframes dock-idle-glow {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 2px rgba(0, 0, 0, 0.85),
-      0 8px 28px rgba(0, 0, 0, 0.65),
-      0 0 22px rgba(61, 214, 198, 0.55),
-      0 0 40px rgba(61, 214, 198, 0.25);
-  }
-  50% {
-    box-shadow:
-      0 0 0 2px rgba(0, 0, 0, 0.85),
-      0 8px 28px rgba(0, 0, 0, 0.65),
-      0 0 36px rgba(61, 214, 198, 0.95),
-      0 0 64px rgba(61, 214, 198, 0.5);
-  }
-}
 
 /* Hub */
 .hub {

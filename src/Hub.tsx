@@ -7,8 +7,6 @@ import type {
   FlowStore,
   MeetingStatus,
 } from "./lib/types";
-import { startRecording, stopRecording } from "./lib/audio";
-import { useDictationEngine } from "./lib/useDictationEngine";
 import { useMeetingCapture } from "./lib/useMeetingCapture";
 
 type Tab =
@@ -37,17 +35,15 @@ export default function Hub() {
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [verifyMsg, setVerifyMsg] = useState("");
+  const [editingCloud, setEditingCloud] = useState(false);
   const [readiness, setReadiness] = useState<string[]>([]);
   const [word, setWord] = useState("");
   const [trigger, setTrigger] = useState("");
   const [expansion, setExpansion] = useState("");
   const [liveStatus, setLiveStatus] = useState("Idle");
-  const [recording, setRecording] = useState(false);
-  // A hotkey (fn) session is driven by useDictationEngine, which owns the same
-  // module-level recorder this panel's button uses. Tracked separately so the button
-  // can stand down instead of calling stopRecording() underneath the engine.
   const [hotkeySession, setHotkeySession] = useState(false);
   const didInitialRoute = useRef(false);
+  const warningTimer = useRef<number | null>(null);
   const [axTrusted, setAxTrusted] = useState<boolean | null>(null);
   const [axStatus, setAxStatus] = useState<AccessibilityStatus | null>(null);
   const [meetingStatus, setMeetingStatus] = useState<MeetingStatus>({
@@ -57,52 +53,23 @@ export default function Hub() {
   });
   const [meetingError, setMeetingError] = useState("");
   const [screenRecordingTrusted, setScreenRecordingTrusted] = useState<boolean | null>(null);
-  const recordingBusy = useRef(false);
 
-  // Main window owns the mic pipeline so hotkeys work before Hub is visible.
-  useDictationEngine(true);
   // Owns the mic-chunk restart loop for meeting transcription, reactive to backend phase.
   useMeetingCapture();
 
   async function toggleHubRecording() {
-    if (recordingBusy.current) return;
-    recordingBusy.current = true;
     try {
-      if (!recording) {
+      if (!hotkeySession) {
         setError("");
         setLiveStatus("Requesting microphone…");
-        await startRecording();
-        setRecording(true);
-        setLiveStatus("Recording… tap again to stop");
+        await invoke("hub_vibe_press");
         return;
       }
       setLiveStatus("Stopping…");
-      const audio = await stopRecording();
-      setRecording(false);
-      if (!audio) {
-        setError("No audio captured. Click Mic permission, enable Flow, then try again.");
-        setLiveStatus("Idle");
-        return;
-      }
-      setLiveStatus("Sending to MyGCP (STT + prompt)… this can take 1–2 min");
-      const text = await invoke<string>("process_dictation", {
-        audioBase64: audio,
-        mode: "vibe",
-      });
-      setLiveStatus("Done — prompt is on the clipboard (⌘V)");
-      setWarning(text.slice(0, 280) + (text.length > 280 ? "…" : ""));
-      await refresh();
+      await invoke("hub_vibe_release");
     } catch (err) {
-      setRecording(false);
       setError(String(err));
       setLiveStatus("Error");
-      try {
-        await stopRecording();
-      } catch {
-        /* ignore */
-      }
-    } finally {
-      recordingBusy.current = false;
     }
   }
 
@@ -163,11 +130,21 @@ export default function Hub() {
           setError(event.payload);
           setWarning("");
           setLiveStatus("Error");
+          setHotkeySession(false);
         }),
       );
       unsubs.push(
         await listen<string>("dictation-warning", (event) => {
           setWarning(event.payload);
+          setHotkeySession(false);
+          setLiveStatus("Idle");
+          if (warningTimer.current != null) {
+            window.clearTimeout(warningTimer.current);
+          }
+          warningTimer.current = window.setTimeout(() => {
+            setWarning("");
+            warningTimer.current = null;
+          }, 4500);
         }),
       );
       unsubs.push(
@@ -178,6 +155,9 @@ export default function Hub() {
       unsubs.push(
         await listen<string>("engine-status", (event) => {
           setLiveStatus(event.payload);
+          if (event.payload === "idle" || event.payload === "error") {
+            setHotkeySession(false);
+          }
         }),
       );
       unsubs.push(
@@ -189,6 +169,12 @@ export default function Hub() {
       unsubs.push(
         await listen("recording-stop", () => {
           setLiveStatus("Hotkey: processing…");
+          setHotkeySession(false);
+        }),
+      );
+      unsubs.push(
+        await listen("recording-cancel", () => {
+          setLiveStatus("Idle");
           setHotkeySession(false);
         }),
       );
@@ -228,6 +214,9 @@ export default function Hub() {
     return () => {
       window.clearInterval(axTimer);
       window.clearInterval(meetingTimer);
+      if (warningTimer.current != null) {
+        window.clearTimeout(warningTimer.current);
+      }
       for (const u of unsubs) u();
     };
   }, []);
@@ -235,7 +224,14 @@ export default function Hub() {
   async function saveConfig() {
     if (!config) return;
     try {
-      await invoke("save_user_config", { config });
+      const cloudCredentialsPresent = Boolean(
+        config.flow_api_url.trim() && config.flow_api_key.trim(),
+      );
+      const nextConfig =
+        cloudCredentialsPresent && config.processing_mode !== "cloud"
+          ? { ...config, processing_mode: "cloud" }
+          : config;
+      await invoke("save_user_config", { config: nextConfig });
       setError("");
       // Read back rather than trusting local state: load_config() applies defaults and
       // migrations, so what the app will actually use can differ from what was typed.
@@ -256,8 +252,13 @@ export default function Hub() {
     );
   }
 
-  // Mirrors cloud_api::uses_cloud on the Rust side.
-  const cloudMode = config.processing_mode.trim().toLowerCase() === "cloud";
+  const cloudConfigured = Boolean(
+    config.flow_api_url.trim() && config.flow_api_key.trim(),
+  );
+  const localConfigured = Boolean(config.llm_api_key.trim());
+  const cloudMode =
+    config.processing_mode.trim().toLowerCase() === "cloud" ||
+    (cloudConfigured && !localConfigured);
 
   return (
     <div className="hub">
@@ -303,8 +304,8 @@ export default function Hub() {
               This is why nothing happens when you press fn. System Settings →
               Privacy &amp; Security → Accessibility → turn ON{" "}
               <strong>Flow</strong>, then quit Flow completely and reopen it.
-              Until then, use the green <strong>Start recording</strong> button
-              below (needs Mic only).
+              Until then, the green <strong>Start recording</strong> button below
+              can test the microphone, but automatic insertion still needs Accessibility.
             </span>
             {axStatus?.app_bundle_path || axStatus?.executable_path ? (
               <span>
@@ -456,14 +457,11 @@ export default function Hub() {
               <button
                 type="button"
                 className="primary"
-                disabled={hotkeySession}
                 onClick={() => void toggleHubRecording()}
               >
                 {hotkeySession
-                  ? "Hotkey session running…"
-                  : recording
-                    ? "Stop & generate prompt"
-                    : "Start recording"}
+                  ? "Stop & generate prompt"
+                  : "Start recording"}
               </button>
               <button
                 type="button"
@@ -757,33 +755,50 @@ export default function Hub() {
 
               {cloudMode ? (
                 <>
-                  <label>
-                    Cloud Run URL
-                    <input
-                      value={config.flow_api_url}
-                      onChange={(e) =>
-                        setConfig({ ...config, flow_api_url: e.target.value })
-                      }
-                      placeholder="https://flow-api-….run.app"
-                    />
-                  </label>
-                  <label>
-                    Cloud Run API key
-                    <input
-                      type="password"
-                      value={config.flow_api_key}
-                      onChange={(e) =>
-                        setConfig({ ...config, flow_api_key: e.target.value })
-                      }
-                      placeholder={
-                        config.flow_api_key ? "•••••••• (saved)" : "flow-api-key"
-                      }
-                    />
-                  </label>
-                  <p className="muted">
-                    Both are written by <code>bash cloud/deploy.sh</code>. Paste them
-                    here only if you are pointing Flow at a different deployment.
-                  </p>
+                  {config.flow_api_url && config.flow_api_key && !editingCloud ? (
+                    <div className="ready-banner ok">
+                      <strong>Cloud connected</strong>
+                      <span>
+                        Flow is already configured for MyGCP. You do not need to
+                        provide another API key.
+                      </span>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => setEditingCloud(true)}
+                      >
+                        Edit cloud connection
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <label>
+                        Cloud Run URL
+                        <input
+                          value={config.flow_api_url}
+                          onChange={(e) =>
+                            setConfig({ ...config, flow_api_url: e.target.value })
+                          }
+                          placeholder="https://flow-api-….run.app"
+                        />
+                      </label>
+                      <label>
+                        Cloud Run API key
+                        <input
+                          type="password"
+                          value={config.flow_api_key}
+                          onChange={(e) =>
+                            setConfig({ ...config, flow_api_key: e.target.value })
+                          }
+                          placeholder="flow-api-key"
+                        />
+                      </label>
+                      <p className="muted">
+                        Only change these when pointing Flow at another deployment.
+                        Existing values are stored locally and never shown in full.
+                      </p>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -852,16 +867,16 @@ export default function Hub() {
                   placeholder="/Users/…/Wispr Flow"
                 />
               </label>
-              <p className="muted">
-                {cloudMode
-                  ? `Cloud Run key: ${config.flow_api_key ? "present" : "missing"}.`
-                  : `DeepSeek key: ${
+              {!cloudMode ? (
+                <p className="muted">
+                  {`DeepSeek key: ${
                       config.llm_api_key
                         ? `present (${config.llm_api_key.slice(0, 6)}…)`
                         : "missing"
                     }.`}{" "}
-                Prefer importing from Secret Manager — never commit keys to git.
-              </p>
+                  Prefer importing from Secret Manager — never commit keys to git.
+                </p>
+              ) : null}
               <label className="checkbox">
                 <input
                   type="checkbox"
@@ -877,6 +892,19 @@ export default function Hub() {
                 always hold-to-talk. Grammar cleanup runs before the Vibe prompt
                 is generated, in every mode.
               </p>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={config.interaction_sounds !== false}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      interaction_sounds: e.target.checked,
+                    })
+                  }
+                />
+                Interaction sounds (start ping / stop cue)
+              </label>
               <label className="checkbox">
                 <input
                   type="checkbox"

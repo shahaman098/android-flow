@@ -69,6 +69,8 @@ extern "C" {
         buffer_size: CFIndex,
         encoding: CFStringEncoding,
     ) -> Boolean;
+    fn CFArrayGetCount(the_array: CFTypeRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(the_array: CFTypeRef, idx: CFIndex) -> CFTypeRef;
 }
 
 struct CfType(CFTypeRef);
@@ -135,6 +137,48 @@ pub fn insert_text_into_focused_element(pid: i32, text: &str) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+/// True when the target app has a focused AX UI element that can receive typing/paste.
+/// Electron apps (Cursor, WhatsApp) often fail Cmd+V silently when nothing is focused;
+/// osascript still returns success, so callers must check this first.
+pub fn has_focused_input_target(pid: i32) -> Result<(), String> {
+    let app = unsafe { AXUIElementCreateApplication(pid as pid_t) };
+    if app.is_null() {
+        return Err("Could not create accessibility handle for target app.".into());
+    }
+
+    let focused = copy_attribute(app, "AXFocusedUIElement").map_err(|_| {
+        "No text field is focused in the target app. Click the Cursor/WhatsApp/TextEdit field, then try again.".to_string()
+    })?;
+    let element = focused.as_ptr();
+    if unsafe { CFGetTypeID(element) } != unsafe { AXUIElementGetTypeID() } {
+        return Err("Focused UI element is not a text input. Click the message field first.".into());
+    }
+
+    // Prefer elements that look like text inputs. Some Electron composers expose a
+    // focused web area without AXValue — still accept those if role suggests text.
+    if ensure_settable(element, "AXValue").is_ok() {
+        return Ok(());
+    }
+    if copy_optional_string_attribute(element, "AXValue")?.is_some() {
+        return Ok(());
+    }
+    let role = copy_optional_string_attribute(element, "AXRole")?.unwrap_or_default();
+    let role_l = role.to_lowercase();
+    if role_l.contains("text")
+        || role_l.contains("area")
+        || role_l.contains("field")
+        || role_l.contains("combo")
+        || role_l.contains("web")
+        || role_l.contains("group")
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Focused element ({role}) does not look like a text field. Click the message box first."
+    ))
 }
 
 fn resolve_insert_range(current_value: &str, selected_range: Option<CFRange>) -> Result<CFRange, String> {
@@ -285,4 +329,149 @@ fn cfstring_to_string(value: CFStringRef) -> Result<String, String> {
 
 fn attr_name(_attr: CFTypeRef) -> &'static str {
     "attribute"
+}
+
+/// Click near the bottom-center of the app's front window (chat composer heuristic).
+pub fn click_composer_area(pid: i32) -> Result<(), String> {
+    click_composer_area_offset(pid, 0.5, 0.92)
+}
+
+pub fn click_composer_area_offset(pid: i32, x_frac: f64, y_frac: f64) -> Result<(), String> {
+    let (x, y, w, h) = front_window_bounds(pid)?;
+    let cx = x + w * x_frac.clamp(0.05, 0.95);
+    let cy = y + h * y_frac.clamp(0.05, 0.98);
+    post_left_click(cx, cy)
+}
+
+pub fn front_window_bounds(pid: i32) -> Result<(f64, f64, f64, f64), String> {
+    let app = unsafe { AXUIElementCreateApplication(pid as pid_t) };
+    if app.is_null() {
+        return Err("Could not create accessibility handle for target app.".into());
+    }
+    let windows = copy_attribute(app, "AXWindows")?;
+    // AXWindows is a CFArray — read first element via objc2-less CFArray API.
+    let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
+    if count < 1 {
+        return Err("Target app has no accessibility windows.".into());
+    }
+    let window = unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), 0) };
+    if window.is_null() {
+        return Err("Target app window handle was null.".into());
+    }
+
+    let pos = copy_attribute(window, "AXPosition")?;
+    let size = copy_attribute(window, "AXSize")?;
+    let (x, y) = ax_point(pos.as_ptr())?;
+    let (w, h) = ax_size(size.as_ptr())?;
+    if w < 40.0 || h < 40.0 {
+        return Err("Target app window bounds were too small.".into());
+    }
+    Ok((x, y, w, h))
+}
+
+fn ax_point(value: CFTypeRef) -> Result<(f64, f64), String> {
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    let mut point = CGPoint { x: 0.0, y: 0.0 };
+    let ok = unsafe { AXValueGetValue(value as AXValueRef, 1, &mut point as *mut _ as *mut c_void) };
+    if ok == 0 {
+        return Err("Could not decode AXPosition.".into());
+    }
+    Ok((point.x, point.y))
+}
+
+fn ax_size(value: CFTypeRef) -> Result<(f64, f64), String> {
+    #[repr(C)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+    let mut size = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    let ok = unsafe { AXValueGetValue(value as AXValueRef, 2, &mut size as *mut _ as *mut c_void) };
+    if ok == 0 {
+        return Err("Could not decode AXSize.".into());
+    }
+    Ok((size.width, size.height))
+}
+
+pub fn post_command_v() -> Result<(), String> {
+    unsafe {
+        let source = CGEventSourceCreate(0); // HID system state
+        if source.is_null() {
+            return Err("Could not create CGEvent source.".into());
+        }
+        let down = CGEventCreateKeyboardEvent(source, 9, true); // kVK_ANSI_V = 9
+        let up = CGEventCreateKeyboardEvent(source, 9, false);
+        if down.is_null() || up.is_null() {
+            return Err("Could not create Cmd+V events.".into());
+        }
+        const CMD: u64 = 0x0010_0000; // kCGEventFlagMaskCommand
+        CGEventSetFlags(down, CMD);
+        CGEventSetFlags(up, CMD);
+        CGEventPost(0, down); // kCGHIDEventTap
+        CGEventPost(0, up);
+        CFRelease(down as CFTypeRef);
+        CFRelease(up as CFTypeRef);
+        CFRelease(source as CFTypeRef);
+    }
+    Ok(())
+}
+
+fn post_left_click(x: f64, y: f64) -> Result<(), String> {
+    unsafe {
+        let source = CGEventSourceCreate(0);
+        if source.is_null() {
+            return Err("Could not create CGEvent source for click.".into());
+        }
+        let down = CGEventCreateMouseEvent(source, 1, CGPoint { x, y }, 0); // left mousedown
+        let up = CGEventCreateMouseEvent(source, 2, CGPoint { x, y }, 0); // left mouseup
+        if down.is_null() || up.is_null() {
+            return Err("Could not create mouse click events.".into());
+        }
+        CGEventPost(0, down);
+        CGEventPost(0, up);
+        CFRelease(down as CFTypeRef);
+        CFRelease(up as CFTypeRef);
+        CFRelease(source as CFTypeRef);
+    }
+    Ok(())
+}
+
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+type CGEventRef = *mut c_void;
+type CGEventSourceRef = *mut c_void;
+type CGEventSourceStateID = i32;
+type CGEventType = u32;
+type CGMouseButton = u32;
+type CGKeyCode = u16;
+type CGEventFlags = u64;
+type CGEventTapLocation = u32;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceCreate(state_id: CGEventSourceStateID) -> CGEventSourceRef;
+    fn CGEventCreateKeyboardEvent(
+        source: CGEventSourceRef,
+        virtual_key: CGKeyCode,
+        key_down: bool,
+    ) -> CGEventRef;
+    fn CGEventCreateMouseEvent(
+        source: CGEventSourceRef,
+        mouse_type: CGEventType,
+        mouse_cursor_position: CGPoint,
+        mouse_button: CGMouseButton,
+    ) -> CGEventRef;
+    fn CGEventSetFlags(event: CGEventRef, flags: CGEventFlags);
+    fn CGEventPost(tap: CGEventTapLocation, event: CGEventRef);
 }

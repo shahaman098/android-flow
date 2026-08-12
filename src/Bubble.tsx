@@ -1,14 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  currentMonitor,
-  cursorPosition,
-  getCurrentWindow,
-  LogicalPosition,
-  monitorFromPoint,
-  primaryMonitor,
-} from "@tauri-apps/api/window";
 import type { MeetingStatus, Status } from "./lib/types";
+import { useDictationEngine } from "./lib/useDictationEngine";
 
 function formatElapsed(startedAtEpochSecs: string | null): string {
   if (!startedAtEpochSecs) return "";
@@ -21,56 +15,57 @@ function formatElapsed(startedAtEpochSecs: string | null): string {
 }
 
 type Mode = "vibe" | "vibe_refine" | "dictate" | "command" | "prompt";
+type BarState = "idle" | "listening" | "processing" | "error";
+type VisualState = BarState | "fallback";
+type FallbackPayload = { text: string; message: string };
 
-const DOCK_WIDTH = 72;
-const DOCK_HEIGHT = 200;
-const DOCK_MARGIN = 28;
+const WAVE_BARS = 9;
 
-/** Prefer the monitor under the mouse — so the pill follows you across screens. */
-async function monitorUnderCursor() {
-  try {
-    const cursor = await cursorPosition();
-    const hit = await monitorFromPoint(cursor.x, cursor.y);
-    if (hit) return hit;
-  } catch {
-    // Fall through if cursor APIs are unavailable.
-  }
-  return (await currentMonitor()) ?? (await primaryMonitor());
-}
-
-async function anchorDockToRightEdge(): Promise<void> {
-  const win = getCurrentWindow();
-  const monitor = await monitorUnderCursor();
-  if (monitor) {
-    const scale = monitor.scaleFactor;
-    const screenX = monitor.position.x / scale;
-    const screenY = monitor.position.y / scale;
-    const screenWidth = monitor.size.width / scale;
-    const screenHeight = monitor.size.height / scale;
-    const targetX = Math.round(screenX + screenWidth - DOCK_WIDTH - DOCK_MARGIN);
-    const targetY = Math.round(screenY + (screenHeight - DOCK_HEIGHT) / 2);
-    const position = await win.outerPosition();
-    const windowScale = await win.scaleFactor();
-    const currentX = position.x / windowScale;
-    const currentY = position.y / windowScale;
-    if (Math.abs(currentX - targetX) > 1 || Math.abs(currentY - targetY) > 1) {
-      await win.setPosition(new LogicalPosition(targetX, targetY));
-    }
-  }
-  // Do NOT call setAlwaysOnTop / setVisibleOnAllWorkspaces from JS — those Tauri
-  // setters reset NSWindow level back to floating and the dock vanishes under Cursor.
-  // Rust configure_dock_overlay owns overlay level + Space joining.
-  if (!(await win.isVisible())) {
-    await win.show();
-  }
-}
-
-function isProcessing(status: Status): boolean {
-  return (
-    status === "recording" ||
+function barStateFromStatus(status: Status): BarState {
+  if (status === "recording") return "listening";
+  if (
     status === "transcribing" ||
     status === "correcting" ||
     status === "pasting"
+  ) {
+    return "processing";
+  }
+  if (status === "error") return "error";
+  return "idle";
+}
+
+async function layoutDock(layout: "idle" | "listening" | "fallback"): Promise<void> {
+  // Rust owns size, click-through, position, window level, and Spaces behavior.
+  // Keeping one owner avoids competing JS/native keepalive loops.
+  await invoke("set_bubble_layout", { layout });
+}
+
+function waveHeights(level: number): number[] {
+  // Diamond envelope (tallest center) with slight phase wobble — matches the pill visualizer.
+  const floor = 0.16;
+  const center = (WAVE_BARS - 1) / 2;
+  return Array.from({ length: WAVE_BARS }, (_, i) => {
+    const dist = center === 0 ? 0 : Math.abs(i - center) / center;
+    const envelope = 1 - dist * 0.62;
+    const wobble = 0.55 + 0.45 * Math.sin(level * 9 + i * 1.15);
+    return Math.min(1, Math.max(floor, floor + level * envelope * wobble));
+  });
+}
+
+function MicIcon() {
+  return (
+    <svg
+      className="flow-bar-mic-icon"
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      aria-hidden
+    >
+      <path
+        fill="currentColor"
+        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"
+      />
+    </svg>
   );
 }
 
@@ -78,12 +73,34 @@ export default function Bubble() {
   const [status, setStatus] = useState<Status>("idle");
   const [mode, setMode] = useState<Mode>("vibe");
   const [error, setError] = useState("");
+  const [micLevel, setMicLevel] = useState(0);
   const [meetingStatus, setMeetingStatus] = useState<MeetingStatus>({
     phase: "idle",
     app_name: null,
     started_at: null,
   });
   const [elapsed, setElapsed] = useState("");
+  const [fallbackText, setFallbackText] = useState("");
+  const [fallbackCopied, setFallbackCopied] = useState(false);
+  const statusRef = useRef<Status>("idle");
+
+  // The always-visible bubble owns dictation capture. Hidden WKWebViews can leave
+  // getUserMedia pending forever even when macOS Microphone permission is granted.
+  useDictationEngine(true);
+
+  const barState = barStateFromStatus(status);
+  const visualState: VisualState = fallbackText ? "fallback" : barState;
+  const dockLayout =
+    visualState === "listening"
+      ? "listening"
+      : visualState === "fallback"
+        ? "fallback"
+        : "idle";
+  const heights = useMemo(() => waveHeights(micLevel), [micLevel]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (meetingStatus.phase !== "capturing") {
@@ -97,15 +114,15 @@ export default function Bubble() {
   }, [meetingStatus.phase, meetingStatus.started_at]);
 
   useEffect(() => {
+    void layoutDock(dockLayout).catch(() => undefined);
+  }, [dockLayout]);
+
+  useEffect(() => {
     let unsubs: Array<() => void> = [];
-    const keepAnchored = () => void anchorDockToRightEdge().catch(() => undefined);
-    keepAnchored();
-    // Follow the cursor's screen closely so the pill stays visible wherever you type.
-    const anchorTimer = window.setInterval(keepAnchored, 750);
 
     (async () => {
       try {
-        await anchorDockToRightEdge();
+        await layoutDock("idle");
       } catch {
         // Positioning is best-effort; dock still renders.
       }
@@ -121,9 +138,14 @@ export default function Bubble() {
                   ? "command"
                   : event.payload === "prompt"
                     ? "prompt"
-                    : "vibe";
+                    : event.payload === "dictate"
+                      ? "dictate"
+                      : "vibe";
           setMode(next);
           setError("");
+          setFallbackText("");
+          setFallbackCopied(false);
+          setMicLevel(0);
           setStatus("recording");
         }),
       );
@@ -132,6 +154,8 @@ export default function Bubble() {
           if (event.payload === "vibe_refine") {
             setMode("vibe_refine");
             setError("");
+            setFallbackText("");
+            setFallbackCopied(false);
             setStatus("correcting");
           } else if (event.payload === "vibe") {
             setMode("vibe");
@@ -140,7 +164,26 @@ export default function Bubble() {
       );
       unsubs.push(
         await listen<string>("recording-stop", () => {
+          setMicLevel(0);
           setStatus("transcribing");
+        }),
+      );
+      unsubs.push(
+        await listen<string>("recording-cancel", (event) => {
+          if (event.payload === "refine") return;
+          setMicLevel(0);
+          setError("");
+          setFallbackText("");
+          setFallbackCopied(false);
+          setStatus("idle");
+        }),
+      );
+      unsubs.push(
+        await listen<number>("mic-level", (event) => {
+          const value = Number(event.payload);
+          if (Number.isFinite(value)) {
+            setMicLevel(Math.min(1, Math.max(0, value)));
+          }
         }),
       );
       unsubs.push(
@@ -165,20 +208,50 @@ export default function Bubble() {
             value === "error"
           ) {
             setStatus(value);
+            if (value === "idle" || value === "error") setMicLevel(0);
             if (value === "idle") setError("");
           }
         }),
       );
       unsubs.push(
+        await listen<FallbackPayload>("dictation-fallback", (event) => {
+          setFallbackText(event.payload.text);
+          setFallbackCopied(false);
+          setMicLevel(0);
+          setError(event.payload.message);
+          setStatus("error");
+        }),
+      );
+      unsubs.push(
         await listen<string>("dictation-error", (event) => {
+          setMicLevel(0);
           setStatus("error");
           setError(event.payload);
+          window.setTimeout(() => {
+            if (statusRef.current === "error") {
+              setStatus("idle");
+              setError("");
+            }
+          }, 4500);
+        }),
+      );
+      unsubs.push(
+        await listen<string>("dictation-warning", (event) => {
+          // Keep warnings available for the tooltip/Hub, but do not replace
+          // the listening UI with a red error pill.
+          setError(event.payload);
+          window.setTimeout(() => {
+            setError("");
+          }, 4500);
         }),
       );
       unsubs.push(
         await listen<string>("dictation-done", () => {
+          setMicLevel(0);
           setStatus("idle");
           setError("");
+          setFallbackText("");
+          setFallbackCopied(false);
         }),
       );
       unsubs.push(
@@ -189,40 +262,138 @@ export default function Bubble() {
     })();
 
     return () => {
-      window.clearInterval(anchorTimer);
       unsubs.forEach((fn) => fn());
     };
   }, []);
 
   const meetingActive = meetingStatus.phase === "capturing";
-  const processing = isProcessing(status);
   const title = meetingActive
     ? `Transcribing ${meetingStatus.app_name ?? "meeting"}… ${elapsed} — text only, no audio saved`
-    : status === "error"
+    : visualState === "fallback"
+      ? fallbackCopied
+        ? "Copied. Paste manually with ⌘V."
+        : error || "Insertion failed. Click to copy, then paste manually."
+    : barState === "error"
       ? error || "Error"
-      : status === "recording"
-        ? "Listening…"
-        : status === "transcribing"
-          ? "Transcribing…"
-          : status === "correcting"
-            ? mode === "vibe_refine"
-              ? "Refining…"
-              : "Processing…"
+      : barState === "listening"
+        ? "Listening… · Stop ■ · Cancel ×"
+        : barState === "processing"
+          ? mode === "vibe_refine"
+            ? "Refining…"
             : status === "pasting"
-              ? "Pasting…"
-              : "Flow — hold fn · fn+1 auto-prompt · fn+2 refine";
+              ? "Inserting…"
+              : "Processing…"
+          : "Flow — hold fn · fn+1 auto-prompt · fn+2 refine";
+
+  async function onStop(e: React.MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    try {
+      await invoke("flow_bar_stop", { mode });
+    } catch {
+      // Session may already be ending.
+    }
+  }
+
+  async function onCancel(e: React.MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    try {
+      await invoke("flow_bar_cancel");
+    } catch {
+      // Session may already be cancelled.
+    }
+  }
+
+  async function onCopyFallback(e: React.MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    if (!fallbackText) return;
+    try {
+      await invoke("copy_text_to_clipboard", { text: fallbackText });
+      setFallbackCopied(true);
+      window.setTimeout(() => {
+        setFallbackText("");
+        setFallbackCopied(false);
+        setStatus("idle");
+        setError("");
+      }, 1800);
+    } catch (err) {
+      setError(`Copy failed: ${err}`);
+    }
+  }
 
   return (
     <div
-      className={`dock ${status}${processing ? " processing" : ""}${meetingActive ? " meeting-active" : ""}`}
+      className={`flow-bar state-${visualState}${meetingActive ? " meeting-active" : ""}`}
       title={title}
       role="status"
       aria-label={title}
     >
-      <div className="dock-pill">
-        {processing ? <span className="dock-loader" aria-hidden /> : null}
-        {status === "error" ? <span className="dock-error-fill" aria-hidden /> : null}
-        {meetingActive ? <span className="dock-meeting-dot" aria-hidden /> : null}
+      <div className="flow-bar-shell">
+        {visualState === "fallback" ? (
+          <button
+            type="button"
+            className="flow-bar-copy-pill"
+            aria-label="Copy dictated text"
+            onClick={onCopyFallback}
+          >
+            {fallbackCopied ? "Copied" : "Copy"}
+          </button>
+        ) : null}
+
+        {(barState === "idle" || barState === "error") && visualState !== "fallback" ? (
+          <div className="flow-bar-idle-mark" aria-hidden>
+            {barState === "error" ? (
+              <span className="flow-bar-error-bang">!</span>
+            ) : (
+              <span className="flow-bar-mic">
+                <MicIcon />
+              </span>
+            )}
+          </div>
+        ) : null}
+
+        {barState === "listening" ? (
+          <>
+            <span className="flow-bar-mic listening" aria-hidden>
+              <MicIcon />
+            </span>
+            <div className="flow-bar-wave" aria-hidden>
+              {heights.map((h, i) => (
+                <span
+                  key={i}
+                  className="flow-bar-wave-bar"
+                  style={{ width: `${Math.round(h * 100)}%` }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              className="flow-bar-btn cancel"
+              aria-label="Cancel recording"
+              onClick={onCancel}
+            >
+              ×
+            </button>
+            <button
+              type="button"
+              className="flow-bar-btn stop"
+              aria-label="Stop and process"
+              onClick={onStop}
+            >
+              <span className="flow-bar-stop-sq" />
+            </button>
+          </>
+        ) : null}
+
+        {barState === "processing" ? (
+          <>
+            <span className="flow-bar-mic processing" aria-hidden>
+              <MicIcon />
+            </span>
+            <div className="flow-bar-spinner" aria-hidden />
+          </>
+        ) : null}
+
+        {meetingActive ? <span className="flow-bar-meeting-dot" aria-hidden /> : null}
       </div>
     </div>
   );

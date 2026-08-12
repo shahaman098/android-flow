@@ -15,6 +15,8 @@ export type AppConfig = {
   whisper_model: string;
   correction_model: string;
   hands_free: boolean;
+  /** Soft start/stop cues when recording begins and ends. */
+  interaction_sounds: boolean;
   language: string;
   active_style_id: string;
   app_aware_tone: boolean;

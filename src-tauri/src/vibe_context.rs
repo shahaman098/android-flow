@@ -4,6 +4,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::load_config;
 
@@ -92,6 +93,21 @@ pub fn load_project_context() -> Result<String, String> {
 pub fn load_constitution() -> String {
     match project_root() {
         Ok(root) => {
+            let key = root.display().to_string();
+            if let Ok(mut cache) = constitution_cache().lock() {
+                if let Some((cached_key, cached_value)) = cache.as_ref() {
+                    if cached_key == &key {
+                        return cached_value.clone();
+                    }
+                }
+                let path = root.join("constitutions").join("vibe-coding.md");
+                let value = compact_constitution(&read_or_placeholder(
+                    &path,
+                    "[FILL: constitutions/vibe-coding.md missing]",
+                ));
+                *cache = Some((key, value.clone()));
+                return value;
+            }
             let path = root.join("constitutions").join("vibe-coding.md");
             compact_constitution(&read_or_placeholder(
                 &path,
@@ -106,6 +122,27 @@ pub fn load_constitution() -> String {
 pub fn load_skill_blurb(skill_id: &str) -> String {
     match project_root() {
         Ok(root) => {
+            let key = format!("{}::{skill_id}", root.display());
+            if let Ok(mut cache) = skill_cache().lock() {
+                if let Some(value) = cache
+                    .iter()
+                    .find_map(|(cached_key, cached_value)| {
+                        (cached_key == &key).then(|| cached_value.clone())
+                    })
+                {
+                    return value;
+                }
+                let path = root
+                    .join("skills")
+                    .join(skill_id)
+                    .join("SKILL.md");
+                let value = compact_skill(&read_or_placeholder(
+                    &path,
+                    &format!("[FILL: skills/{skill_id}/SKILL.md]"),
+                ));
+                cache.push((key, value.clone()));
+                return value;
+            }
             let path = root
                 .join("skills")
                 .join(skill_id)
@@ -117,6 +154,16 @@ pub fn load_skill_blurb(skill_id: &str) -> String {
         }
         Err(_) => format!("[FILL: skills/{skill_id}/SKILL.md unavailable]"),
     }
+}
+
+fn constitution_cache() -> &'static Mutex<Option<(String, String)>> {
+    static CACHE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn skill_cache() -> &'static Mutex<Vec<(String, String)>> {
+    static CACHE: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn read_or_placeholder(path: &Path, placeholder: &str) -> String {

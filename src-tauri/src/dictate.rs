@@ -2,6 +2,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::json;
 use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::cloud_api::{self, ProcessPayload};
@@ -103,8 +105,29 @@ pub async fn process_dictation(
     audio_base64: String,
     mode: String,
 ) -> Result<String, String> {
-    let result = process_dictation_inner(&app, audio_base64, mode).await;
-    if result.is_err() {
+    let result = process_dictation_inner(&app, audio_base64, mode, None).await;
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|err| !is_no_speech_error(err))
+    {
+        hide_bubble(&app);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn process_transcript(
+    app: AppHandle,
+    transcript: String,
+    mode: String,
+) -> Result<String, String> {
+    let result = process_dictation_inner(&app, String::new(), mode, Some(transcript)).await;
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|err| !is_no_speech_error(err))
+    {
         hide_bubble(&app);
     }
     result
@@ -116,10 +139,22 @@ pub fn hide_bubble_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn is_no_speech_error(message: &str) -> bool {
+    let text = message.to_lowercase();
+    text.contains("no audio captured")
+        || text.contains("no speech detected")
+        || text.contains("empty text")
+        || text.contains("audio too short")
+        || text.contains("gcp speech returned empty text")
+        || text.contains("cloud stt returned empty text")
+        || text.contains("cloud process returned empty text")
+}
+
 async fn process_dictation_inner(
     app: &AppHandle,
     audio_base64: String,
     mode: String,
+    pre_transcribed_text: Option<String>,
 ) -> Result<String, String> {
     let config = load_config();
     ensure_providers(&config)?;
@@ -141,7 +176,13 @@ async fn process_dictation_inner(
 
     let store = load_store();
 
-    let raw_text = if !audio_bytes.is_empty() && audio_bytes.len() < 1500 {
+    let raw_text = if let Some(text) = pre_transcribed_text {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err("No speech detected.".into());
+        }
+        text
+    } else if !audio_bytes.is_empty() && audio_bytes.len() < 1500 {
         return Err(format!(
             "Audio too short ({} bytes). Hold the hotkey longer while speaking.",
             audio_bytes.len()
@@ -174,11 +215,8 @@ async fn process_dictation_inner(
             }
             let expanded = expand_snippets(&raw_text, &store.snippets);
             let _ = app.emit("dictation-status", "correcting");
-            let corrected =
-                polish_text(&config, &expanded, app_name.as_deref(), &store).await?;
-            let _ = app.emit("partial-transcript", &corrected);
-            let _ = app.emit("dictation-status", "correcting");
-            generate_vibe_prompt(&config, &corrected).await?
+            generate_vibe_prompt_from_speech(&config, &expanded, app_name.as_deref(), &store)
+                .await?
         }
         // Control+2: select entire prompt + project context → refined Vibe Coding prompt
         "vibe_refine" => {
@@ -374,7 +412,6 @@ pub async fn verify_llm_connection() -> Result<String, String> {
     }
 
     let base = config.llm_base_url.trim().trim_end_matches('/');
-    let client = reqwest::Client::new();
     let body = json!({
         "model": config.llm_model,
         "temperature": 0.0,
@@ -384,7 +421,7 @@ pub async fn verify_llm_connection() -> Result<String, String> {
         ]
     });
 
-    let response = client
+    let response = deepseek_client()
         .post(format!("{base}/chat/completions"))
         .bearer_auth(config.llm_api_key.trim())
         .json(&body)
@@ -463,7 +500,7 @@ pub async fn import_deepseek_from_gcloud() -> Result<String, String> {
 /// Control+2 entry point: select-all → load context → refine → paste (no speech).
 pub async fn process_vibe_refine(app: AppHandle) -> Result<String, String> {
     let _ = app.emit("dictation-status", "correcting");
-    let result = process_dictation_inner(&app, String::new(), "vibe_refine".into()).await;
+    let result = process_dictation_inner(&app, String::new(), "vibe_refine".into(), None).await;
     if result.is_err() {
         hide_bubble(&app);
     }
@@ -476,15 +513,35 @@ pub fn prepare_vibe_refine(app: &AppHandle) -> Result<String, String> {
     select_all_and_capture(app)
 }
 
-/// Control+1 skill: grammar-corrected idea → perfect Vibe Coding prompt.
-async fn generate_vibe_prompt(config: &AppConfig, corrected: &str) -> Result<String, String> {
+/// Faster local Control+1 path: one DeepSeek call instead of grammar-cleanup
+/// followed by a second prompt-generation call.
+async fn generate_vibe_prompt_from_speech(
+    config: &AppConfig,
+    spoken: &str,
+    app_name: Option<&str>,
+    store: &crate::store::FlowStore,
+) -> Result<String, String> {
     let constitution = vibe_context::load_constitution();
     let skill = vibe_context::load_skill_blurb("vibe-prompt");
+    let app_tone = if config.app_aware_tone {
+        app_aware_instruction(app_name)
+    } else {
+        String::new()
+    };
+    let dict = store
+        .dictionary
+        .iter()
+        .map(|d| d.word.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let system = format!(
-        r#"You generate a perfect Vibe Coding prompt from the user's grammar-corrected speech.
+        r#"You generate a perfect Vibe Coding prompt from raw speech.
 
-You are NOT implementing the task — you only write the prompt text an AI coding agent will receive.
+First silently clean up the speech: fix grammar, spelling, punctuation, filler words, and capitalization.
+Then write the final prompt an AI coding agent will receive.
+
+You are NOT implementing the task — you only write the prompt text.
 
 Constitution:
 {constitution}
@@ -497,17 +554,23 @@ Rules:
 - Follow the canonical template from the constitution exactly: all ten sections, in order, none empty
 - Use [FILL: …] placeholders where specifics are unknown
 - Do not invent features beyond the user's request
-- Return ONLY the prompt — no preamble or quotes
-- Language preference code: {lang}"#,
+- Return ONLY the final prompt — no transcript, preamble, quotes, or explanation
+- Language preference code: {lang}
+- App tone guidance: {app_tone}
+- Preserve these dictionary terms exactly when present: {dict}"#,
         constitution = constitution,
         skill = skill,
         lang = config.language,
+        app_tone = if app_tone.is_empty() {
+            "none"
+        } else {
+            &app_tone
+        },
+        dict = if dict.is_empty() { "none" } else { &dict },
     );
 
-    let user = format!(
-        "Create a perfect Vibe Coding prompt from this corrected speech:\n\n{corrected}"
-    );
-    chat_completion(config, &system, &user).await
+    let user = format!("Raw spoken request:\n\n{spoken}");
+    chat_completion(config, &system, &user, 2200).await
 }
 
 /// Control+2 skill: selected prompt + context/ → refined Vibe Coding prompt.
@@ -544,7 +607,7 @@ Rules:
     let user = format!(
         "Selected generated prompt:\n\n{selected_prompt}\n\n---\nProject context:\n\n{project_context}\n\n---\nProduce the refined Vibe Coding prompt."
     );
-    chat_completion(config, &system, &user).await
+    chat_completion(config, &system, &user, 2600).await
 }
 
 fn build_prompt_source(selected: Option<&str>, spoken: &str) -> String {
@@ -591,7 +654,7 @@ Rules:
         rough
     );
 
-    chat_completion(config, &system, &user).await
+    chat_completion(config, &system, &user, 1600).await
 }
 
 fn expand_snippets(text: &str, snippets: &[crate::store::Snippet]) -> String {
@@ -688,7 +751,7 @@ Rules:
         dict = if dict.is_empty() { "none" } else { &dict },
     );
 
-    chat_completion(config, &system, text).await
+    chat_completion(config, &system, text, output_cap_for_text(text, 400, 1600)).await
 }
 
 async fn run_command(
@@ -721,7 +784,13 @@ Rules:
     );
 
     let user = format!("Selected text:\n{selected}\n\nInstruction:\n{instruction}");
-    chat_completion(config, &system, &user).await
+    chat_completion(
+        config,
+        &system,
+        &user,
+        output_cap_for_text(&format!("{selected}\n{instruction}"), 400, 1800),
+    )
+    .await
 }
 
 fn app_aware_instruction(app_name: Option<&str>) -> String {
@@ -748,7 +817,12 @@ fn app_aware_instruction(app_name: Option<&str>) -> String {
     }
 }
 
-async fn chat_completion(config: &AppConfig, system: &str, user: &str) -> Result<String, String> {
+async fn chat_completion(
+    config: &AppConfig,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
     let base = config.llm_base_url.trim().trim_end_matches('/');
     let model = if config.llm_model.trim().is_empty() {
         "deepseek-v4-flash"
@@ -756,10 +830,10 @@ async fn chat_completion(config: &AppConfig, system: &str, user: &str) -> Result
         config.llm_model.trim()
     };
 
-    let client = reqwest::Client::new();
     let body = json!({
         "model": model,
         "temperature": 0.2,
+        "max_tokens": max_tokens,
         "thinking": { "type": "disabled" },
         "messages": [
             { "role": "system", "content": system },
@@ -767,7 +841,7 @@ async fn chat_completion(config: &AppConfig, system: &str, user: &str) -> Result
         ]
     });
 
-    let response = client
+    let response = deepseek_client()
         .post(format!("{base}/chat/completions"))
         .bearer_auth(config.llm_api_key.trim())
         .json(&body)
@@ -799,6 +873,25 @@ async fn chat_completion(config: &AppConfig, system: &str, user: &str) -> Result
         return Err("DeepSeek returned empty content.".into());
     }
     Ok(content)
+}
+
+fn output_cap_for_text(text: &str, floor: u32, ceiling: u32) -> u32 {
+    // Roughly four chars per token, plus room for punctuation/formatting.
+    let estimated = (text.chars().count() as u32 / 3).saturating_add(220);
+    estimated.clamp(floor, ceiling)
+}
+
+fn deepseek_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .user_agent("Flow.app/0.1 deepseek-client")
+            .build()
+            .expect("DeepSeek HTTP client should build")
+    })
 }
 
 #[cfg(test)]

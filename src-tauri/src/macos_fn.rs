@@ -191,7 +191,7 @@ fn start_refine(app: &AppHandle) {
         set_recording_active(app, false);
         // Discard the audio instead of going through `recording-stop`, which would
         // transcribe and paste it.
-        let _ = app.emit("recording-cancel", "dictate");
+        let _ = app.emit("recording-cancel", "refine");
     }
 
     let _ = app.emit("dictation-status", "fn+2 refine");

@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub whisper_model: String,
     pub correction_model: String,
     pub hands_free: bool,
+    /// Soft start/stop cues when recording begins and ends.
+    pub interaction_sounds: bool,
     pub language: String,
     pub active_style_id: String,
     pub app_aware_tone: bool,
@@ -64,6 +66,7 @@ impl Default for AppConfig {
             correction_model: DEFAULT_LLM_MODEL.into(),
             // Tap Control+1 to start, tap again to stop — more reliable than hold on macOS.
             hands_free: true,
+            interaction_sounds: true,
             language: "en".into(),
             active_style_id: "clear".into(),
             app_aware_tone: true,
@@ -205,6 +208,17 @@ pub fn load_config() -> AppConfig {
             cfg.flow_api_key = key;
             dirty = true;
         }
+    }
+    if !cfg.flow_api_url.trim().is_empty()
+        && !cfg.flow_api_key.trim().is_empty()
+        && cfg.llm_api_key.trim().is_empty()
+        && !cfg.processing_mode.trim().eq_ignore_ascii_case("cloud")
+    {
+        // A configured Cloud Run endpoint means the Mac should not ask for direct
+        // DeepSeek credentials. Prefer the managed cloud path unless local mode
+        // has its own LLM key configured.
+        cfg.processing_mode = "cloud".into();
+        dirty = true;
     }
     // One-time migration: old OpenAI-only configs.
     if cfg.llm_api_key.trim().is_empty() && !cfg.openai_api_key.trim().is_empty() {

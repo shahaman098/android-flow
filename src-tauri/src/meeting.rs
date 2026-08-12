@@ -290,9 +290,10 @@ pub async fn ingest_chunk(app: &AppHandle, speaker: &str, audio_bytes: Vec<u8>) 
     Ok(())
 }
 
-/// Background poll for known call-app processes. This only ever gates the Hub banner — it never
-/// starts capture on its own. If the detected process disappears mid-capture, it's treated as a
-/// safety-net call-end and stops the session the same way a manual Stop would.
+/// Optional background poll for known call-app processes. It is intentionally not started by
+/// default: a process being open is not evidence that a call is active, and false banners make
+/// the Hub look broken. Keep this available for a future call-state-aware detector.
+#[allow(dead_code)]
 pub fn start_detection_loop(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
@@ -328,6 +329,7 @@ pub fn start_detection_loop(app: AppHandle) {
     });
 }
 
+#[allow(dead_code)]
 fn detect_running_app() -> Option<(String, String)> {
     let output = Command::new("ps").args(["-axo", "comm="]).output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);

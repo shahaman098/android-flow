@@ -14,6 +14,10 @@ mod system_audio;
 mod vibe_context;
 
 use serde::Serialize;
+#[cfg(target_os = "macos")]
+use std::fs::File;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
 use focus::{
     clear_selected_text, hide_bubble, show_bubble, DictationTarget, RecordingFlag,
 };
@@ -22,11 +26,26 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     ActivationPolicy, Emitter, Manager, WindowEvent,
 };
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[cfg(target_os = "macos")]
+    let _instance_lock = match acquire_instance_lock() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            // Launch Services normally reopens the existing app. Direct executable
+            // launches do not, so avoid creating a second hotkey/mic engine.
+            return;
+        }
+        Err(err) => {
+            eprintln!("Flow instance lock failed: {err}");
+            return;
+        }
+    };
+
+    let app = tauri::Builder::default()
         .manage(DictationTarget::default())
         .manage(RecordingFlag::default())
         .manage(meeting::MeetingSession::default())
@@ -61,10 +80,18 @@ pub fn run() {
             dictate::verify_llm_connection,
             dictate::import_deepseek_from_gcloud,
             dictate::process_dictation,
+            dictate::process_transcript,
             dictate::hide_bubble_window,
             dictate::transcribe_partial,
             hub_vibe_press,
             hub_vibe_release,
+            flow_bar_stop,
+            flow_bar_cancel,
+            reset_recording_session,
+            set_bubble_expanded,
+            set_bubble_layout,
+            copy_text_to_clipboard,
+            log_dictation_error,
             hide_hub_window,
             open_accessibility_settings,
             open_microphone_settings,
@@ -135,11 +162,7 @@ pub fn run() {
                 }
             }
 
-            // Background poll for known call apps (Zoom, Teams, Slack, Discord, WhatsApp,
-            // FaceTime) — only ever gates the Hub's meeting-transcription banner, never starts
-            // capture on its own.
-            #[cfg(target_os = "macos")]
-            meeting::start_detection_loop(app.handle().clone());
+            prewarm_local_processing();
 
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
@@ -153,14 +176,18 @@ pub fn run() {
                 show_hub_window(app.handle());
             }
 
-            focus::show_bubble(app.handle());
+            focus::set_bubble_expanded(app.handle(), false);
 
             #[cfg(target_os = "macos")]
             {
                 let dock_app = app.handle().clone();
                 std::thread::spawn(move || {
                     loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        // Skip while pasting so the dock cannot steal Cmd+V focus.
+                        if focus::is_pasting() {
+                            continue;
+                        }
                         focus::show_bubble(&dock_app);
                     }
                 });
@@ -168,48 +195,82 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Flow");
+        .build(tauri::generate_context!())
+        .expect("error while building Flow");
+
+    app.run(|handle, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            show_hub_window(handle);
+            focus::show_bubble(handle);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_instance_lock() -> Result<Option<File>, String> {
+    let path = std::env::temp_dir().join(format!("com.efi.voiceflow.{}.lock", unsafe {
+        libc::getuid()
+    }));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(Some(file))
+    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(format!(
+            "Could not lock {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+fn prewarm_local_processing() {
+    let cfg = config::load_config();
+    if cloud_api::uses_cloud(&cfg) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let _ = stt_gcp::adc_access_token();
+    });
 }
 
 /// Start mic session for `dictate` (activate) or `vibe` (auto-prompt).
 pub fn begin_recording_session(app: &tauri::AppHandle, mode: &str) -> Result<(), String> {
     clear_selected_text(app);
+
+    // Capture the typing target BEFORE the Flow Bar can become frontmost.
+    // NSWorkspace path is fast (~ms); do not open Hub here — that stole focus and
+    // made paste land on clipboard-only.
+    match focus::capture_frontmost_app(app) {
+        Ok(name) if focus::is_flow_app_name(&name) => {
+            let _ = app.emit(
+                "dictation-warning",
+                "Click a text field in Cursor/WhatsApp first — Flow was frontmost, so text may stay on the clipboard (⌘V).",
+            );
+        }
+        Ok(name) => {
+            let _ = app.emit("dictation-status", format!("recording → {name}"));
+        }
+        Err(err) => {
+            let _ = app.emit(
+                "dictation-warning",
+                format!("{err} Recording anyway — grant Accessibility if paste fails."),
+            );
+        }
+    }
+
     show_bubble(app);
 
-    // Open the mic before anything slow. Resolving the frontmost app is an osascript
-    // round-trip (100-300ms) and used to run ahead of this emit — on the main thread,
-    // from the fn key-down handler — so every session lost the first word or two. The
-    // target app is not needed until paste time, seconds later, so it resolves below
-    // while the recorder is already warming up.
     app.emit("recording-start", mode)
         .map_err(|e| format!("Failed to start recording UI: {e}"))?;
-
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        let (message, show_hub) = match focus::capture_frontmost_app(&handle) {
-            Ok(name) if focus::is_flow_app_name(&name) => (
-                Some("Recording from Flow Hub — result stays on clipboard unless you clicked another app first.".to_string()),
-                true,
-            ),
-            Ok(name) => {
-                let _ = handle.emit("dictation-status", format!("recording → {name}"));
-                (None, false)
-            }
-            Err(err) => (
-                Some(format!("{err} Recording anyway — grant Accessibility if paste fails.")),
-                true,
-            ),
-        };
-
-        if let Some(message) = message {
-            let _ = handle.emit("dictation-warning", message);
-        }
-        if show_hub {
-            let hub = handle.clone();
-            let _ = handle.run_on_main_thread(move || show_hub_window(&hub));
-        }
-    });
 
     Ok(())
 }
@@ -335,6 +396,94 @@ fn hub_vibe_press(app: tauri::AppHandle) -> Result<(), String> {
 fn hub_vibe_release(app: tauri::AppHandle) -> Result<(), String> {
     handle_toggle_shortcut(&app, ShortcutState::Released, false, "vibe");
     Ok(())
+}
+
+/// Flow Bar Stop — finish capture and process (same as releasing fn).
+#[tauri::command]
+fn flow_bar_stop(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let flag = app.state::<RecordingFlag>();
+    let should_stop = flag
+        .active
+        .lock()
+        .map(|mut active| {
+            let was_active = *active;
+            *active = false;
+            was_active
+        })
+        .unwrap_or(false);
+    if !should_stop {
+        return Ok(());
+    }
+    let session_mode = if mode.is_empty() {
+        "dictate".to_string()
+    } else {
+        mode
+    };
+    stop_recording_session(&app, &session_mode);
+    Ok(())
+}
+
+/// Flow Bar Cancel — discard the in-progress recording with no paste.
+#[tauri::command]
+fn flow_bar_cancel(app: tauri::AppHandle) -> Result<(), String> {
+    let flag = app.state::<RecordingFlag>();
+    let should_cancel = flag
+        .active
+        .lock()
+        .map(|mut active| {
+            let was_active = *active;
+            *active = false;
+            was_active
+        })
+        .unwrap_or(false);
+    if !should_cancel {
+        return Ok(());
+    }
+    let _ = app.emit("recording-cancel", "bar");
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_recording_session(app: tauri::AppHandle) -> Result<(), String> {
+    let flag = app.state::<RecordingFlag>();
+    let mut active = flag
+        .active
+        .lock()
+        .map_err(|_| "Internal error: recording lock poisoned. Restart Flow.".to_string())?;
+    *active = false;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_bubble_expanded(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
+    focus::set_bubble_expanded(&app, expanded);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_bubble_layout(app: tauri::AppHandle, layout: String) -> Result<(), String> {
+    focus::set_bubble_layout(&app, &layout);
+    Ok(())
+}
+
+#[tauri::command]
+fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| format!("Clipboard write failed: {e}"))
+}
+
+#[tauri::command]
+fn log_dictation_error(message: String) -> Result<(), String> {
+    use std::io::Write;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut file = std::fs::File::create("/tmp/flow-dictation-last-error.log")
+        .map_err(|e| format!("Could not open dictation error log: {e}"))?;
+    writeln!(file, "{timestamp} {message}")
+        .map_err(|e| format!("Could not write dictation error log: {e}"))
 }
 
 #[tauri::command]

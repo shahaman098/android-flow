@@ -38,6 +38,14 @@ codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
   --sign "$SIGNING_IDENTITY" "$BUILT"
 codesign --verify --deep --strict --verbose=1 "$BUILT"
 
+# A previous build linked Swift concurrency through @rpath without emitting any
+# LC_RPATH, so it installed successfully and crashed in dyld on every launch.
+if otool -L "$BUILT/Contents/MacOS/flow-app" | grep -q '@rpath/libswift' \
+  && ! otool -l "$BUILT/Contents/MacOS/flow-app" | grep -q 'LC_RPATH'; then
+  echo "error: Flow references @rpath Swift libraries but has no LC_RPATH." >&2
+  exit 1
+fi
+
 if ! codesign -dvvv "$BUILT" 2>&1 | grep -F "Authority=Apple Development:" >/dev/null; then
   echo "error: $BUILT does not have an Apple Development signature." >&2
   exit 1
@@ -59,6 +67,20 @@ fi
 
 ditto "$BUILT" "$DEST"
 codesign --verify --deep --strict --verbose=1 "$DEST"
+
+# Verify that dyld can load the executable before reporting a successful install.
+# Launch it directly, wait briefly, and require it to still be alive.
+"$DEST/Contents/MacOS/flow-app" >/tmp/flow-install-smoke.log 2>&1 &
+smoke_pid=$!
+sleep 2
+if ! kill -0 "$smoke_pid" 2>/dev/null; then
+  wait "$smoke_pid" || true
+  echo "error: installed Flow exited during launch smoke test." >&2
+  cat /tmp/flow-install-smoke.log >&2 || true
+  exit 1
+fi
+kill "$smoke_pid" 2>/dev/null || true
+wait "$smoke_pid" 2>/dev/null || true
 
 echo "installed → $DEST"
 codesign -dvvv "$DEST" 2>&1 | grep -E "^(Identifier|Signature|Authority=Apple Development|Sealed Resources|TeamIdentifier)" || true
