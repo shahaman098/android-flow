@@ -1,10 +1,11 @@
-# Android Flow — Vibe Coding voice prompts
+# Sprout — Vibe Coding voice prompts
 
 Android companion for **speech → cleanup → Vibe Coding prompts**.
 Floating bubble + Accessibility insert, powered by shared Cloud Run `flow-api`.
 
 GitHub: [shahaman098/android-flow](https://github.com/shahaman098/android-flow)  
 Mac Flow stays on [shahaman098/wispr-flow](https://github.com/shahaman098/wispr-flow).
+This tree has no Tauri 2, `src-tauri/`, `src/`, macOS Accessibility, fn hotkeys, side dock, or local Whisper pipeline.
 
 | Control | Pipeline |
 |---|---|
@@ -13,6 +14,16 @@ Mac Flow stays on [shahaman098/wispr-flow](https://github.com/shahaman098/wispr-
 | **Tap bubble → Fix grammar** | Read focused text → grammar/spelling cleanup → replace |
 
 **Languages:** English · हिन्दी · नेपाली — pick in Hub (UI + speech + LLM output).
+
+## No fallbacks
+
+This repo has no fallback paths and will not add any. Failures surface as errors.
+
+- Vibe prompt uses the LLM draft (and a repair pass only when the template check fails). There is no mechanical template when the LLM is down.
+- Hold-bubble, vibe, and grammar insert only through Accessibility. There is no clipboard copy-and-paste path.
+- Cloud STT is Groq by default. `STT_PROVIDER=gcp_speech` is an explicit deploy choice, not an automatic switch.
+
+Do not reintroduce fallbacks.
 
 ## Folder hierarchy
 
@@ -28,10 +39,13 @@ Android Flow/
 ├── skills/
 │   ├── speech-to-text/
 │   ├── grammar-correct/
-│   └── vibe-prompt/
+│   ├── vibe-prompt/
+│   └── meeting-transcript/   # deferred; Mac-only in wispr-flow
 ├── docs/cloud-hosting.md
 └── PRIVACY.md
 ```
+
+There is no desktop client in this repository. Do not add `src-tauri/`, React/Vite, or macOS capture/paste code here.
 
 ## Run on your phone
 
@@ -60,7 +74,7 @@ APK path after build:
 
 1. Allow **Microphone**
 2. Allow **Display over other apps** (floating bubble)
-3. Enable **Android Flow** under **Accessibility**
+3. Enable **Sprout** under **Accessibility**
 4. Paste `FLOW_API_URL` + `FLOW_API_KEY` → **Save** → **Test API**
 5. Tap **Launch floating bubble**
 

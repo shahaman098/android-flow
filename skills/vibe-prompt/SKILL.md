@@ -4,14 +4,17 @@ Turns rough text from the active field into a perfect Vibe Coding prompt using p
 
 ## Trigger
 
-**fn+1** after selecting/capturing the current field text.
+Bubble **Vibe prompt** after reading the focused field text.
 
 ## Implementation
 
-- Cloud mode: `cloud/app/llm.py:vibe_prompt_from_text()` (draft → automated template/proper-noun check →
+- `cloud/app/llm.py:vibe_prompt_from_text()` (draft → automated template/proper-noun check →
   repair pass only if the check fails)
-- Local mode: `generate_vibe_prompt_from_existing_text()` in `src-tauri/src/dictate.rs`
+- Client: `android/.../service/BubbleOverlayService.kt` → `FlowApiClient.vibeText`
+- Insert: `FlowAccessibilityService.insertOrReplaceText`
 - System guidance from `constitutions/vibe-coding.md` (canonical template + quality bar)
+
+There is no local Tauri / `src-tauri` path in this repository.
 
 ## Worked example (few-shot anchor)
 
@@ -85,4 +88,4 @@ checklist maps 1:1 to the Task bullets. This is the bar every generated prompt m
 
 ## Output
 
-A single structured prompt pasted into the frontmost app.
+A single structured prompt inserted into the focused field.

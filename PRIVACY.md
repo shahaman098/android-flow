@@ -1,4 +1,4 @@
-# Privacy — Android Flow
+# Privacy — Sprout
 
 Last updated: 2026-08-14
 
@@ -7,9 +7,9 @@ https://shahaman098.github.io/android-flow/privacy.html
 
 Contact: sahkris0844@gmail.com
 
-## What Android Flow is
+## What Sprout is
 
-Android Flow is a dictation and Vibe Coding helper. A floating bubble records your voice and inserts text into the app you are using. You configure your own `flow-api` URL and API key. The Play Store listing does not include a hosted Flow backend.
+Sprout is a dictation and Vibe Coding helper. A floating bubble records your voice and inserts text into the app you are using. You configure your own `flow-api` URL and API key. The Play Store listing does not include a hosted Flow backend.
 
 ## Data we process
 

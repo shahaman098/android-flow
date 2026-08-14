@@ -41,7 +41,6 @@ class Mistake(BaseModel):
 class ProcessTrace(BaseModel):
     draft: str | None = None
     repaired: bool = False
-    used_fallback: bool = False
     polish_rejected: bool = False
     mistakes: list[Mistake] = Field(default_factory=list)
 

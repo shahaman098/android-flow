@@ -1,4 +1,4 @@
-# Play Console — Android Flow
+# Play Console — Sprout
 
 Package: `com.efi.androidflow`  
 Version: `1.0.0` (versionCode `1`)  
@@ -19,14 +19,14 @@ This app is **not** a hosted dictation service. Users paste their own `FLOW_API_
 
 ## Store listing copy
 
-**App name:** Android Flow
+**App name:** Sprout
 
 **Short description (≤80 chars):**
 Dictate into any app. Hold the bubble for speech, vibe prompts, and grammar.
 
 **Full description:**
 
-Android Flow is a floating bubble for dictation and Vibe Coding prompts.
+Sprout is a floating bubble for dictation and Vibe Coding prompts.
 
 Hold the bubble to speak into the focused text field. Tap the bubble for a Vibe Coding prompt or grammar cleanup. English, Hindi (हिन्दी), and Nepali (नेपाली) are supported in the Hub.
 
@@ -76,7 +76,7 @@ Collected data types to declare: **Microphone / voice recordings** (App function
 ### Accessibility
 
 - **Is this an accessibility app?** Declare use of the Accessibility API.
-- **Why:** Insert and replace text in the currently focused editable field after dictation, vibe prompt, or grammar cleanup. Clipboard fallback if insert fails.
+- **Why:** Insert and replace text in the currently focused editable field after dictation, vibe prompt, or grammar cleanup. Accessibility is required; there is no clipboard fallback.
 - **Does not:** read other apps’ screens beyond the focused editable field, click UI, or scrape content.
 
 ### Display over other apps
@@ -97,12 +97,12 @@ Questionnaire: **Tools / Productivity / Reference**. No user-generated social fe
 
 ## Reviewer notes (paste into Console)
 
-Android Flow requires a user-provided flow-api.
+Sprout requires a user-provided flow-api.
 
 Test steps:
 1. Open Hub.
 2. Paste FLOW_API_URL and FLOW_API_KEY (HTTPS). Save. Test API.
-3. Enable Microphone (confirm the disclosure), Display over other apps, and Accessibility → Android Flow.
+3. Enable Microphone (confirm the disclosure), Display over other apps, and Accessibility → Sprout.
 4. Launch floating bubble.
 5. Open any notes app, focus a field, hold the bubble to dictate. Tap the bubble for Vibe prompt / Fix grammar.
 

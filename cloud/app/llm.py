@@ -19,9 +19,8 @@ import httpx
 
 from .settings import settings
 
-# The `_fallback_prompt` paths below return HTTP 200 with a mechanically-built
-# template, so a dead or too-slow LLM is indistinguishable from success at the
-# client. Log every fallback so it shows up in Cloud Run logs instead.
+# Failures must surface to the client. Do not add mechanical templates, provider
+# switches, or other fallback paths. No further fallback development.
 logger = logging.getLogger(__name__)
 
 
@@ -55,14 +54,12 @@ class GenerationTrace:
     draft: str = ""
     final: str = ""
     repaired: bool = False
-    used_fallback: bool = False
     polish_rejected: bool = False
     mistakes: list[dict] = field(default_factory=list)
 
     def as_api(self) -> dict:
         payload = {
             "repaired": self.repaired,
-            "used_fallback": self.used_fallback,
             "polish_rejected": self.polish_rejected,
             "mistakes": self.mistakes,
         }
@@ -72,10 +69,9 @@ class GenerationTrace:
 
     def log(self, mode: str) -> None:
         logger.info(
-            "training_trace mode=%s repaired=%s fallback=%s polish_rejected=%s mistakes=%s",
+            "training_trace mode=%s repaired=%s polish_rejected=%s mistakes=%s",
             mode,
             self.repaired,
-            self.used_fallback,
             self.polish_rejected,
             [item.get("type") for item in self.mistakes],
             extra={
@@ -84,7 +80,6 @@ class GenerationTrace:
                 "draft_chars": len(self.draft),
                 "final_chars": len(self.final),
                 "repaired": self.repaired,
-                "used_fallback": self.used_fallback,
                 "polish_rejected": self.polish_rejected,
                 "mistakes": self.mistakes,
             },
@@ -408,97 +403,6 @@ def _compact_project_context(text: str) -> str:
     if not text:
         return "[FILL: context/]"
     return _trim_text(text, 1800)
-
-
-def _clean_line(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip(" -:\n\t")
-
-
-def _sentence_parts(text: str) -> list[str]:
-    parts = [_clean_line(p) for p in re.split(r"[.\n;]+", text) if _clean_line(p)]
-    return parts
-
-
-def _title_from_text(text: str) -> str:
-    words = [w for w in re.findall(r"[A-Za-z0-9+/._'-]+", text) if w]
-    if not words:
-        return "Prompt Request"
-    title = " ".join(words[:6]).strip()
-    return title[:80]
-
-
-def _task_bullets(text: str) -> list[str]:
-    parts = _sentence_parts(text)
-    bullets = parts[:5]
-    if not bullets and text.strip():
-        bullets = [_clean_line(text)]
-    return bullets or ["[FILL: specify the exact work to do]"]
-
-
-def _context_bullets(project_context: str) -> list[str]:
-    lines = []
-    for raw in project_context.splitlines():
-        raw = raw.strip()
-        if raw.startswith("- "):
-            cleaned = _clean_line(raw[2:])
-            if cleaned:
-                lines.append(cleaned)
-        elif raw and not raw.startswith("#") and len(lines) < 4:
-            cleaned = _clean_line(raw)
-            if cleaned:
-                lines.append(cleaned)
-        if len(lines) >= 4:
-            break
-    return lines
-
-
-def _fallback_prompt(source_text: str, project_context: str) -> str:
-    tasks = _task_bullets(source_text)
-    context_lines = _context_bullets(project_context)
-    output_focus = "Return a concise coding prompt ready to hand to an implementation agent."
-    checklist = "\n".join(f"- [ ] {item}" for item in tasks[:5])
-    context_block = "\n".join(f"- {item}" for item in context_lines[:3]) or "- [FILL: add relevant project context]"
-    return f"""**Title**
-- {_title_from_text(source_text)}
-
-**Role & Stance**
-- Act as a pragmatic software engineer.
-- Be concise, concrete, and implementation-focused.
-
-**Task**
-{chr(10).join(f"- {item}" for item in tasks)}
-
-**Context**
-{context_block}
-
-**Inputs Available**
-- Source text: {source_text.strip() or "[FILL: provide source text]"}
-- Project context loaded by Flow when available.
-
-**Output Requirements**
-- {output_focus}
-- Keep all ten required sections in this template.
-- Use short bullets and avoid padding.
-
-**Constraints / Do-nots**
-- Do not invent requirements beyond the source text and provided context.
-- Preserve proper nouns, identifiers, and product names exactly.
-- Use [FILL: ...] when something required is unknown.
-
-**Examples / References**
-*None provided.*
-
-**Execution Checklist**
-{checklist}
-
-**Conflict Resolution**
-- If instructions conflict, follow this priority order:
-  1. Safety and non-negotiable constraints
-  2. Output requirements
-  3. Task objective
-  4. Context and examples
-- If something is ambiguous, make the most reasonable assumption and state it briefly.
-- If a requirement cannot be satisfied, explain the gap and give the closest valid output."""
 
 
 def _fix_dictionary_homophones(text: str, dictionary: list[str]) -> str:
@@ -885,28 +789,15 @@ Rules:
         "Create the optimized Vibe Coding prompt."
     )
     trace = GenerationTrace(source=rough_text)
-    try:
-        draft = _strip_wrapper(
-            await chat(
-                system,
-                user,
-                temperature=0.1,
-                timeout=60.0,
-                max_tokens=REFINE_PROMPT_MAX_TOKENS,
-            )
+    draft = _strip_wrapper(
+        await chat(
+            system,
+            user,
+            temperature=0.1,
+            timeout=60.0,
+            max_tokens=REFINE_PROMPT_MAX_TOKENS,
         )
-    except Exception:
-        logger.warning("vibe_text: draft call failed, returning template fallback", exc_info=True)
-        trace.used_fallback = True
-        trace.final = _fallback_prompt(rough_text, project_context)
-        trace.mistakes.append(
-            {
-                "type": "fallback_template",
-                "detail": "Draft LLM call failed; mechanical template was returned.",
-            }
-        )
-        trace.log("vibe_text")
-        return trace
+    )
 
     trace.draft = draft
     section_mistakes = _vibe_section_mistakes(draft)
@@ -928,23 +819,8 @@ Rules:
             trace.log("vibe_text")
             return trace
         except Exception:
-            structural = [
-                item["detail"]
-                for item in section_mistakes
-                if item["type"] in {"missing_section", "empty_section"}
-            ]
-            logger.warning("vibe_text: repair call failed (structural=%s)", structural, exc_info=True)
-            if structural:
-                trace.used_fallback = True
-                trace.final = _fallback_prompt(rough_text, project_context)
-                trace.mistakes.append(
-                    {
-                        "type": "fallback_template",
-                        "detail": "Repair LLM call failed; mechanical template was returned.",
-                    }
-                )
-            else:
-                trace.final = draft
+            logger.warning("vibe_text: repair call failed; keeping draft", exc_info=True)
+            trace.final = draft
             trace.log("vibe_text")
             return trace
     trace.final = draft

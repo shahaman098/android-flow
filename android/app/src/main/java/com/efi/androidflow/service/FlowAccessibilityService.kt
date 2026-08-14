@@ -1,18 +1,13 @@
 package com.efi.androidflow.service
 
 import android.accessibilityservice.AccessibilityService
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.Toast
-import com.efi.androidflow.R
 
 /**
  * Reads the focused editable field and inserts processed text.
- * Falls back to clipboard + toast when direct insert is unavailable.
+ * Insert is Accessibility-only; there is no clipboard fallback.
  */
 class FlowAccessibilityService : AccessibilityService() {
 
@@ -39,49 +34,22 @@ class FlowAccessibilityService : AccessibilityService() {
 
     fun insertOrReplaceText(text: String): Boolean {
         val root = rootInActiveWindow
-        val focused = root?.let { findFocusedEditable(it) }
-        if (focused != null) {
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-            }
-            if (focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                return true
-            }
+        val focused = root?.let { findFocusedEditable(it) } ?: return false
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        copyToClipboard(text)
-        Toast.makeText(
-            this,
-            getString(R.string.bubble_copied_clipboard),
-            Toast.LENGTH_SHORT,
-        ).show()
-        return false
+        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
     fun appendText(text: String): Boolean {
         val root = rootInActiveWindow
-        val focused = root?.let { findFocusedEditable(it) }
-        if (focused != null) {
-            val existing = focused.text?.toString().orEmpty()
-            val joined = if (existing.isBlank()) text else "$existing$text"
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, joined)
-            }
-            if (focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                return true
-            }
+        val focused = root?.let { findFocusedEditable(it) } ?: return false
+        val existing = focused.text?.toString().orEmpty()
+        val joined = if (existing.isBlank()) text else "$existing$text"
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, joined)
         }
-        copyToClipboard(text)
-        Toast.makeText(
-            this,
-            getString(R.string.bubble_copied_clipboard),
-            Toast.LENGTH_SHORT,
-        ).show()
-        return false
-    }
-
-    private fun copyToClipboard(text: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Android Flow", text))
+        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
     private fun findFocusedEditable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {

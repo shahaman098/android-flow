@@ -118,6 +118,39 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(traced.mistakes[0]["type"], "unsafe_polish")
 
+    async def test_vibe_draft_failure_raises_instead_of_template(self):
+        mocked_chat = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+        with patch.object(llm, "chat", new=mocked_chat):
+            with self.assertRaises(RuntimeError):
+                await llm.vibe_prompt_traced(
+                    "fix prompting feature",
+                    "project context",
+                    "constitution",
+                    "en-GB",
+                    [],
+                    "skill notes",
+                )
+
+    async def test_vibe_repair_failure_keeps_draft(self):
+        incomplete = "**Title**\n- Fix Flow prompting\n\n**Task**\n- Fix it"
+        mocked_chat = AsyncMock(side_effect=[incomplete, RuntimeError("repair failed")])
+        with patch.object(llm, "chat", new=mocked_chat):
+            traced = await llm.vibe_prompt_traced(
+                "Fix Flow prompting",
+                "project context",
+                "constitution",
+                "en-GB",
+                ["Flow"],
+                "skill notes",
+            )
+
+        self.assertFalse(traced.repaired)
+        self.assertEqual(traced.final, incomplete)
+        self.assertNotIn("used_fallback", traced.as_api())
+
+    def test_no_fallback_prompt_helper(self):
+        self.assertFalse(hasattr(llm, "_fallback_prompt"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,11 +5,11 @@ floating bubble **Vibe prompt** action.
 
 ## Product
 
-- Name: Android Flow (Android fork of Wispr Flow / Mac Flow)
+- Name: Sprout (Android companion; package `com.efi.androidflow`)
 - Mascot: Spout (whale with speech bubble — launcher icon, `store/icon-512.png`,
   `drawable/ic_spout.png`)
 - Kind: Android companion for dictation + Vibe Coding prompts (floating bubble +
-  Accessibility insert / clipboard fallback)
+  Accessibility insert)
 - Stack: Kotlin / Jetpack Compose shell + shared Cloud Run `flow-api`
 
 ## Architecture
@@ -27,7 +27,7 @@ floating bubble **Vibe prompt** action.
 
 | Control | Behavior |
 |---|---|
-| Hold bubble | Speech → STT → light cleanup → insert at focus. Clipboard fallback if Accessibility is off |
+| Hold bubble | Speech → STT → light cleanup → insert at focus (Accessibility required) |
 | Bubble → Vibe prompt | Read focused text → merge `context/` → perfect Vibe Coding prompt → replace field |
 | Bubble → Fix grammar | Read focused text → grammar/spelling cleanup → replace field |
 
@@ -47,6 +47,8 @@ Meeting / live-conversation answer (Mac `fn+3`) is deferred on Android.
 - Do not silently recreate cloud hosting, switch LLM providers, or re-enable billing.
 - Do not change what hold-bubble / vibe / grammar do at a high level without an explicit request.
 - Do not drop any of the ten canonical template sections in `constitutions/vibe-coding.md`.
+- Do not add fallback paths (mechanical LLM templates, clipboard insert, silent provider switching). No further fallback development.
+- Do not add macOS-only client code (`src-tauri/`, Tauri, fn hotkeys, side dock, local Whisper, ScreenCaptureKit). That lives in wispr-flow.
 
 ## Notes
 

@@ -66,8 +66,8 @@ bash cloud/deploy.sh
 
 Paste the resulting `FLOW_API_URL` and `FLOW_API_KEY` into the Android Hub settings.
 
-If Groq is not available, `STT_PROVIDER=gcp_speech bash cloud/deploy.sh` keeps processing in the
-cloud but is materially more expensive for speech-to-text.
+To use GCP Speech instead of Groq, set `STT_PROVIDER=gcp_speech` before deploy. That is an
+explicit provider choice (more expensive), not an automatic fallback.
 
 ## Recreate cheap Flow cloud hosting
 

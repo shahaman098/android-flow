@@ -1,6 +1,6 @@
 # skills/
 
-Capability definitions for Android Flow.
+Capability definitions for Sprout.
 
 | Skill | Role |
 |---|---|

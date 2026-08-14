@@ -5,8 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Speech. Groq is the default cheapest cloud path; GCP Speech remains as a
-    # fallback when no Groq key is available or accuracy is preferred.
+    # Speech. Groq is the default cheapest cloud path. GCP Speech is an explicit
+    # STT_PROVIDER choice, not an automatic fallback.
     stt_provider: str = Field(
         default="groq_whisper",
         validation_alias=AliasChoices("STT_PROVIDER", "stt_provider"),
