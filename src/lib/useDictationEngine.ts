@@ -7,23 +7,26 @@ import {
   playStartPing,
   playStopSound,
 } from "./interactionSounds";
-import type { AppConfig } from "./types";
+import type { UiPrefs } from "./types";
 
-type Mode = "vibe" | "vibe_refine" | "dictate" | "command" | "prompt";
+type Mode =
+  | "vibe_text"
+  | "correct_text"
+  | "meeting_answer"
+  | "dictate";
 
 function parseMode(payload: string): Mode {
-  if (payload === "vibe") return "vibe";
-  if (payload === "vibe_refine") return "vibe_refine";
+  if (payload === "vibe_text") return "vibe_text";
+  if (payload === "correct_text") return "correct_text";
+  if (payload === "meeting_answer") return "meeting_answer";
   if (payload === "dictate") return "dictate";
-  if (payload === "command") return "command";
-  if (payload === "prompt") return "prompt";
-  return "vibe";
+  return "dictate";
 }
 
 async function soundsEnabled(): Promise<boolean> {
   try {
-    const config = await invoke<AppConfig>("get_config");
-    return config.interaction_sounds !== false;
+    const prefs = await invoke<UiPrefs>("get_ui_prefs");
+    return prefs.interaction_sounds !== false;
   } catch {
     return true;
   }
@@ -45,11 +48,13 @@ async function resetNativeRecordingSession(): Promise<void> {
   }
 }
 
-function canUseProgressiveStt(config: AppConfig, mode: Mode): boolean {
+function canUseProgressiveStt(prefs: UiPrefs, mode: Mode): boolean {
+  const processing = prefs.processing_mode.trim().toLowerCase();
   return (
-    config.processing_mode.trim().toLowerCase() === "local" &&
-    mode !== "vibe_refine" &&
-    mode !== "prompt"
+    processing !== "cloud" &&
+    mode !== "vibe_text" &&
+    mode !== "correct_text" &&
+    mode !== "meeting_answer"
   );
 }
 
@@ -73,12 +78,15 @@ function isNoSpeechError(message: string): boolean {
 export function useDictationEngine(enabled: boolean) {
   const busyRef = useRef(false);
   const openingRef = useRef(false);
-  const pendingActionRef = useRef<"stop" | "cancel" | "refine" | null>(null);
-  const modeRef = useRef<Mode>("vibe");
+  const pendingActionRef = useRef<"stop" | "cancel" | null>(null);
+  const modeRef = useRef<Mode>("dictate");
   const partialTranscriptRef = useRef("");
   const partialBusyRef = useRef(false);
   const partialQueueRef = useRef<string[]>([]);
   const partialSessionRef = useRef(0);
+  const sttTranscriptRef = useRef("");
+  const sttBusyRef = useRef(false);
+  const sttQueueRef = useRef<string[]>([]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -100,20 +108,36 @@ export function useDictationEngine(enabled: boolean) {
           if (await soundsEnabled()) playStopSound();
           const session = partialSessionRef.current;
           const audio = await stopRecording({ flushPartial: true });
+          const drained = await waitForSttDrain(session, 2500);
           await waitForPartialDrain(session, 1800);
+          const sttTranscript = sttTranscriptRef.current.trim();
           const partialTranscript = partialTranscriptRef.current.trim();
           partialSessionRef.current += 1;
           partialQueueRef.current = [];
-          if (!audio && !partialTranscript && mode !== "prompt" && mode !== "vibe_refine") {
+          sttQueueRef.current = [];
+          if (
+            !audio &&
+            !sttTranscript &&
+            !partialTranscript &&
+            mode !== "vibe_text" &&
+            mode !== "correct_text" &&
+            mode !== "meeting_answer"
+          ) {
             await emit("dictation-warning", "No speech detected.");
             await emit("engine-status", "idle");
             await invoke("hide_bubble_window");
             return;
           }
           await emit("engine-status", "transcribing");
-          const text = partialTranscript
+          // Prefer stitched ~50s STT chunks so long holds never hit the 60s
+          // GCP sync cap. If the last chunk is still in flight, fall back to the
+          // full recording instead of pasting a truncated transcript.
+          const stitched = drained
+            ? sttTranscript || partialTranscript
+            : "";
+          const text = stitched
             ? await invoke<string>("process_transcript", {
-                transcript: partialTranscript,
+                transcript: stitched,
                 mode,
               })
             : await invoke<string>("process_dictation", {
@@ -142,6 +166,8 @@ export function useDictationEngine(enabled: boolean) {
         partialSessionRef.current += 1;
         partialTranscriptRef.current = "";
         partialQueueRef.current = [];
+        sttTranscriptRef.current = "";
+        sttQueueRef.current = [];
         await cancelRecording();
         if (await soundsEnabled()) playCancelSound();
         await emit("mic-level", 0);
@@ -191,6 +217,47 @@ export function useDictationEngine(enabled: boolean) {
         }
       };
 
+      const drainSttQueue = async (session: number) => {
+        if (sttBusyRef.current) return;
+        sttBusyRef.current = true;
+        try {
+          while (
+            sttQueueRef.current.length > 0 &&
+            partialSessionRef.current === session
+          ) {
+            const chunk = sttQueueRef.current.shift();
+            if (!chunk) continue;
+            try {
+              const text = await invoke<string>("transcribe_partial", {
+                audioBase64: chunk,
+              });
+              if (partialSessionRef.current !== session) return;
+              const clean = text.trim();
+              if (!clean) continue;
+              sttTranscriptRef.current = [sttTranscriptRef.current.trim(), clean]
+                .filter(Boolean)
+                .join(" ");
+              await emit("partial-transcript", sttTranscriptRef.current);
+            } catch (err) {
+              if (!isNoSpeechError(String(err))) {
+                await logDictationError(`Chunk STT failed: ${err}`);
+              }
+            }
+          }
+        } finally {
+          sttBusyRef.current = false;
+        }
+      };
+
+      const waitForSttDrain = async (session: number, timeoutMs: number) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline && partialSessionRef.current === session) {
+          if (!sttBusyRef.current && sttQueueRef.current.length === 0) return true;
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+        return !sttBusyRef.current && sttQueueRef.current.length === 0;
+      };
+
       unlistenStart = await listen<string>("recording-start", async (event) => {
         if (busyRef.current || openingRef.current) {
           await resetNativeRecordingSession();
@@ -209,25 +276,31 @@ export function useDictationEngine(enabled: boolean) {
         partialSessionRef.current += 1;
         partialTranscriptRef.current = "";
         partialQueueRef.current = [];
+        sttTranscriptRef.current = "";
+        sttQueueRef.current = [];
         try {
           const session = partialSessionRef.current;
-          const config = await invoke<AppConfig>("get_config");
+          const prefs = await invoke<UiPrefs>("get_ui_prefs");
           await startRecording({
-            onPartialChunk: canUseProgressiveStt(config, modeRef.current)
+            onPartialChunk: canUseProgressiveStt(prefs, modeRef.current)
               ? (base64) => {
                   if (partialSessionRef.current !== session) return;
                   partialQueueRef.current.push(base64);
                   void drainPartialQueue(session);
                 }
               : undefined,
+            onSttChunk:
+              modeRef.current === "dictate"
+                ? (base64) => {
+                    if (partialSessionRef.current !== session) return;
+                    sttQueueRef.current.push(base64);
+                    void drainSttQueue(session);
+                  }
+                : undefined,
           });
           openingRef.current = false;
           const pending = pendingActionRef.current;
           pendingActionRef.current = null;
-          if (pending === "refine") {
-            await cancelRecording();
-            return;
-          }
           if (pending === "cancel") {
             await cancelCurrentRecording();
             return;
@@ -242,7 +315,6 @@ export function useDictationEngine(enabled: boolean) {
           openingRef.current = false;
           pendingActionRef.current = null;
           await resetNativeRecordingSession();
-          if (pending === "refine") return;
           if (pending === "cancel") {
             await emit("mic-level", 0);
             await emit("engine-status", "idle");
@@ -256,15 +328,10 @@ export function useDictationEngine(enabled: boolean) {
         }
       });
 
-      // fn+2 or Flow Bar Cancel: drop the recorder without processing.
-      unlistenCancel = await listen<string>("recording-cancel", async (event) => {
-        const transitioningToRefine = event.payload === "refine";
+      // Text-transform chords or Flow Bar Cancel: drop the recorder without processing.
+      unlistenCancel = await listen<string>("recording-cancel", async () => {
         if (openingRef.current) {
-          pendingActionRef.current = transitioningToRefine ? "refine" : "cancel";
-          await cancelRecording();
-          return;
-        }
-        if (transitioningToRefine) {
+          pendingActionRef.current = "cancel";
           await cancelRecording();
           return;
         }

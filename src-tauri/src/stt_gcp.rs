@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::config::{language_bcp47, AppConfig};
+use crate::dictation_post::{is_unusable_stt, sanitize_stt_transcript};
 
 #[derive(Debug, Deserialize)]
 struct RecognizeResponse {
@@ -162,8 +163,8 @@ pub async fn transcribe(config: &AppConfig, audio_bytes: Vec<u8>) -> Result<Stri
         }
     }
 
-    let text = parts.join(" ").trim().to_string();
-    if text.is_empty() {
+    let text = sanitize_stt_transcript(&parts.join(" "));
+    if text.is_empty() || is_unusable_stt(&text) {
         return Err("GCP Speech returned empty text (no speech detected in audio).".into());
     }
     Ok(text)

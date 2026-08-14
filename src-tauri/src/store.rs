@@ -39,7 +39,6 @@ pub struct HistoryItem {
 pub struct Stats {
     pub total_dictations: u64,
     pub total_words: u64,
-    pub total_commands: u64,
     #[serde(default)]
     pub total_prompts: u64,
 }
@@ -122,13 +121,21 @@ pub fn load_store() -> FlowStore {
     }
 
     match fs::read_to_string(&path) {
-        Ok(raw) => {
-            let mut store: FlowStore = serde_json::from_str(&raw).unwrap_or_default();
-            if store.styles.is_empty() {
-                store.styles = default_styles();
+        Ok(raw) => match serde_json::from_str::<FlowStore>(&raw) {
+            Ok(mut store) => {
+                if store.styles.is_empty() {
+                    store.styles = default_styles();
+                }
+                store
             }
-            store
-        }
+            Err(_) => {
+                crate::config::quarantine_corrupt(&path);
+                FlowStore {
+                    styles: default_styles(),
+                    ..Default::default()
+                }
+            }
+        },
         Err(_) => FlowStore {
             styles: default_styles(),
             ..Default::default()
@@ -139,7 +146,7 @@ pub fn load_store() -> FlowStore {
 pub fn save_store(store: &FlowStore) -> Result<(), String> {
     let path = store_path()?;
     let raw = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    fs::write(path, raw).map_err(|e| e.to_string())
+    crate::config::atomic_write_private(&path, &raw)
 }
 
 pub fn add_history(text: &str, app_name: Option<String>, mode: &str) -> Result<(), String> {
@@ -158,10 +165,10 @@ pub fn add_history(text: &str, app_name: Option<String>, mode: &str) -> Result<(
     );
     store.history.truncate(200);
     store.stats.total_words += word_count as u64;
-    match mode {
-        "command" => store.stats.total_commands += 1,
-        "prompt" => store.stats.total_prompts += 1,
-        _ => store.stats.total_dictations += 1,
+    if mode == "vibe_text" {
+        store.stats.total_prompts += 1;
+    } else {
+        store.stats.total_dictations += 1;
     }
     save_store(&store)
 }
@@ -185,6 +192,12 @@ fn chrono_like_now() -> String {
 #[tauri::command]
 pub fn get_store() -> Result<FlowStore, String> {
     Ok(load_store())
+}
+
+pub fn learn_dictionary_from_correction(model_output: &str, gold: &str) {
+    for word in crate::dictation_post::learnable_dictionary_terms(model_output, gold) {
+        let _ = add_dictionary_word(word);
+    }
 }
 
 #[tauri::command]

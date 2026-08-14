@@ -13,11 +13,18 @@ let partialTimer: number | null = null;
 let partialMimeType: string | undefined;
 let partialChunkHandler: ((base64: string) => void) | null = null;
 let pendingPartialFlushes: Promise<void>[] = [];
+let sttRecorder: MediaRecorder | null = null;
+let sttTimer: number | null = null;
+let sttMimeType: string | undefined;
+let sttChunkHandler: ((base64: string) => void) | null = null;
+let pendingSttFlushes: Promise<void>[] = [];
 const MICROPHONE_OPEN_TIMEOUT_MS = 8000;
 const PARTIAL_CHUNK_MS = 2000;
+const STT_CHUNK_MS = 50000;
 
 type RecordingOptions = {
   onPartialChunk?: (base64: string) => void;
+  onSttChunk?: (base64: string) => void;
 };
 
 type StopRecordingOptions = {
@@ -125,6 +132,87 @@ function startPartialLoop(stream: MediaStream, onChunk?: (base64: string) => voi
     current.stop();
     startPartialRecorder(stream);
   }, PARTIAL_CHUNK_MS);
+}
+
+function startSttRecorder(stream: MediaStream) {
+  if (!sttChunkHandler) return;
+  const localChunks: BlobPart[] = [];
+  const recorder = sttMimeType
+    ? new MediaRecorder(stream, { mimeType: sttMimeType })
+    : new MediaRecorder(stream);
+
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0) localChunks.push(event.data);
+  };
+
+  recorder.onstop = () => {
+    if (!sttChunkHandler || localChunks.length === 0) return;
+    const blob = new Blob(localChunks, {
+      type: recorder.mimeType || sttMimeType || "audio/webm",
+    });
+    if (blob.size < 1500) return;
+    const handler = sttChunkHandler;
+    const flush = blobToBase64(blob)
+      .then((base64) => {
+        handler?.(base64);
+      })
+      .catch(() => undefined);
+    pendingSttFlushes.push(flush);
+    void flush.finally(() => {
+      pendingSttFlushes = pendingSttFlushes.filter((item) => item !== flush);
+    });
+  };
+
+  sttRecorder = recorder;
+  recorder.start();
+}
+
+function startSttLoop(stream: MediaStream, onChunk?: (base64: string) => void) {
+  stopSttLoop(false);
+  if (!onChunk) return;
+
+  sttChunkHandler = onChunk;
+  sttMimeType = pickMimeType();
+  startSttRecorder(stream);
+  sttTimer = window.setInterval(() => {
+    const current = sttRecorder;
+    if (!current || current.state !== "recording") return;
+    current.stop();
+    startSttRecorder(stream);
+  }, STT_CHUNK_MS);
+}
+
+function stopSttLoop(flushFinal: boolean) {
+  if (sttTimer != null) {
+    window.clearInterval(sttTimer);
+    sttTimer = null;
+  }
+
+  const current = sttRecorder;
+  sttRecorder = null;
+  if (!flushFinal) {
+    sttChunkHandler = null;
+    sttMimeType = undefined;
+    pendingSttFlushes = [];
+  }
+  if (current && current.state === "recording") {
+    current.ondataavailable = flushFinal ? current.ondataavailable : null;
+    current.onstop = flushFinal ? current.onstop : null;
+    try {
+      current.stop();
+    } catch {
+      // Recorder may already be stopping.
+    }
+  }
+}
+
+async function waitForSttFlushes(timeoutMs = 2000): Promise<void> {
+  const pending = [...pendingSttFlushes];
+  if (pending.length === 0) return;
+  await Promise.race([
+    Promise.allSettled(pending),
+    new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
+  ]);
 }
 
 function stopPartialLoop(flushFinal: boolean) {
@@ -235,6 +323,7 @@ export async function startRecording(options: RecordingOptions = {}): Promise<vo
 
       startLevelMeter(stream);
       startPartialLoop(stream, options.onPartialChunk);
+      startSttLoop(stream, options.onSttChunk);
 
       // A timeslice makes WebKit emit fragments that are not guaranteed to form
       // one valid file. Let stop() produce a finalized recording.
@@ -268,6 +357,7 @@ export async function stopRecording(options: StopRecordingOptions = {}): Promise
     return null;
   }
 
+  stopSttLoop(true);
   if (options.flushPartial) {
     stopPartialLoop(true);
   }
@@ -280,6 +370,9 @@ export async function stopRecording(options: StopRecordingOptions = {}): Promise
     recorder.stop();
   });
 
+  await waitForSttFlushes();
+  sttChunkHandler = null;
+  sttMimeType = undefined;
   if (options.flushPartial) {
     await waitForPartialFlushes();
     partialChunkHandler = null;
@@ -318,6 +411,7 @@ export async function cancelRecording(): Promise<void> {
 }
 
 function cleanupRecorderState() {
+  stopSttLoop(false);
   stopPartialLoop(false);
   stopLevelMeter();
   activeStream?.getTracks().forEach((track) => track.stop());
@@ -327,11 +421,13 @@ function cleanupRecorderState() {
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () =>
+      reject(reader.error || new Error("Could not encode audio"));
+    reader.readAsDataURL(blob);
+  });
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
 }

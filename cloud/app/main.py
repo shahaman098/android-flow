@@ -1,4 +1,4 @@
-"""Flow processing API — STT + grammar + Vibe prompts on MyGCP Cloud Run."""
+"""Flow processing API — cloud STT + grammar + Vibe prompts on Cloud Run."""
 
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ class TranscribeRequest(BaseModel):
 
 
 class ProcessRequest(BaseModel):
-    mode: str = Field(description="vibe | vibe_refine | dictate")
+    mode: str = Field(
+        description="vibe_text | dictate | correct_text | meeting_answer | edit_text"
+    )
     audio_base64: str | None = None
     selected_text: str | None = None
     project_context: str | None = None
@@ -31,9 +33,23 @@ class ProcessRequest(BaseModel):
     dictionary: list[str] = Field(default_factory=list)
 
 
+class Mistake(BaseModel):
+    type: str
+    detail: str = ""
+
+
+class ProcessTrace(BaseModel):
+    draft: str | None = None
+    repaired: bool = False
+    used_fallback: bool = False
+    polish_rejected: bool = False
+    mistakes: list[Mistake] = Field(default_factory=list)
+
+
 class TextResponse(BaseModel):
     text: str
     raw_transcript: str | None = None
+    trace: ProcessTrace | None = None
 
 
 class MeetingTranscribeRequest(BaseModel):
@@ -55,9 +71,8 @@ async def root() -> dict:
     return {
         "service": "Flow Processing API",
         "ok": True,
-        "project": settings.gcp_project_id,
-        "region": settings.gcp_location,
         "docs": "/docs",
+        "livez": "/livez",
         "health": "/health",
         "endpoints": {
             "transcribe": "POST /v1/transcribe",
@@ -67,18 +82,25 @@ async def root() -> dict:
     }
 
 
-@app.get("/health")
+@app.get("/livez")
+async def livez() -> dict:
+    return {"ok": True}
+
+
+@app.get("/health", dependencies=[Depends(require_api_key)])
 async def health() -> dict:
     try:
         llm_status = await llm.health()
+        stt_status = await stt.health()
     except Exception as exc:  # noqa: BLE001 - health must expose downstream failure
-        raise HTTPException(status_code=503, detail=f"LLM backend unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"Cloud backend unavailable: {exc}") from exc
     return {
         "ok": True,
         "project": settings.gcp_project_id,
         "region": settings.gcp_location,
-        "stt_model": settings.stt_model,
-        "llm_backend": "ollama",
+        "stt_backend": stt_status["provider"],
+        "stt_model": stt_status["model"],
+        "llm_backend": llm_status["provider"],
         "llm_url": settings.hermes_base_url,
         "llm_model": settings.hermes_model,
         "llm_ok": llm_status["ok"],
@@ -103,14 +125,14 @@ async def process(body: ProcessRequest) -> TextResponse:
     language = body.language or settings.default_language
 
     try:
-        if mode == "vibe_refine":
+        if mode == "vibe_text":
             selected = (body.selected_text or "").strip()
             if not selected:
                 raise HTTPException(
                     status_code=400,
-                    detail="vibe_refine requires selected_text (Control+2).",
+                    detail="vibe_text requires selected_text (fn+1).",
                 )
-            text = await llm.refine_prompt(
+            traced = await llm.vibe_prompt_traced(
                 selected,
                 body.project_context or "",
                 body.constitution or "",
@@ -118,24 +140,59 @@ async def process(body: ProcessRequest) -> TextResponse:
                 body.dictionary,
                 body.skill or "",
             )
+            return TextResponse(text=traced.final, trace=ProcessTrace.model_validate(traced.as_api()))
+
+        if mode == "correct_text":
+            selected = (body.selected_text or "").strip()
+            if not selected:
+                raise HTTPException(
+                    status_code=400,
+                    detail="correct_text requires selected_text (fn+2).",
+                )
+            traced = await llm.polish_traced(selected, language, body.dictionary)
+            return TextResponse(text=traced.final, trace=ProcessTrace.model_validate(traced.as_api()))
+
+        if mode == "meeting_answer":
+            question = (body.selected_text or "").strip()
+            transcript = (body.project_context or "").strip()
+            if not question or not transcript:
+                raise HTTPException(
+                    status_code=400,
+                    detail="meeting_answer requires selected_text question and project_context transcript.",
+                )
+            traced = await llm.answer_meeting_question_traced(question, transcript, language)
+            return TextResponse(text=traced.final, trace=ProcessTrace.model_validate(traced.as_api()))
+
+        if mode == "edit_text":
+            selected = (body.selected_text or "").strip()
+            instruction = (body.project_context or "").strip()
+            if not selected or not instruction:
+                raise HTTPException(
+                    status_code=400,
+                    detail="edit_text requires selected_text and project_context instruction.",
+                )
+            text = await llm.edit_selected_text(selected, instruction, language, body.dictionary)
             return TextResponse(text=text)
 
-        if mode not in ("vibe", "dictate"):
+        if mode != "dictate":
             raise HTTPException(status_code=400, detail=f"Unsupported mode: {body.mode}")
 
-        if not body.audio_base64 or not body.audio_base64.strip():
-            raise HTTPException(status_code=400, detail=f"{mode} mode requires audio_base64.")
-
-        audio = base64.b64decode(body.audio_base64.strip())
-        raw = await stt.transcribe(audio, language, body.dictionary)
-        corrected = await llm.polish(raw, language, body.dictionary)
-        if mode == "dictate":
-            # Hold § — activate: grammar-cleaned text only (no prompt generation).
-            return TextResponse(text=corrected, raw_transcript=raw)
-        text = await llm.vibe_prompt(
-            corrected, body.constitution or "", language, body.dictionary, body.skill or ""
+        if body.audio_base64 and body.audio_base64.strip():
+            audio = base64.b64decode(body.audio_base64.strip())
+            raw = await stt.transcribe(audio, language, body.dictionary)
+        elif (body.selected_text or "").strip():
+            raw = body.selected_text.strip()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="dictate mode requires audio_base64 or selected_text transcript.",
+            )
+        traced = await llm.polish_traced(raw, language, body.dictionary)
+        return TextResponse(
+            text=traced.final,
+            raw_transcript=raw,
+            trace=ProcessTrace.model_validate(traced.as_api()),
         )
-        return TextResponse(text=text, raw_transcript=raw)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

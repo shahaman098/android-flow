@@ -16,6 +16,7 @@ dist-ssr
 !.env.example
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Editor directories and files
 .vscode/*
@@ -27,3 +28,8 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Build / local agent artifacts
+src-tauri/target/
+.skill-archive/
+.codex-flow-state.*

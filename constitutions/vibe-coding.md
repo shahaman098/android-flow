@@ -1,6 +1,6 @@
 # Vibe Coding Constitution
 
-Rules that govern prompt generation for this Vibe Coding project (Control+1 / Control+2).
+Rules that govern prompt generation for this Vibe Coding project (fn+1).
 These rules are enforced by both the initial generation pass and the automated quality-check
 repair pass, so they must be concrete enough to check mechanically, not just aesthetically.
 
@@ -77,7 +77,7 @@ repair pass, so they must be concrete enough to check mechanically, not just aes
 - The prompt reads as something you could hand directly to a coding agent with zero further
   editing — no meta-commentary about the prompt itself.
 
-## Refine step (Control+2) additions
+## Context-enrichment additions
 
 - Merge concrete facts from `context/*.md` into Context / Inputs Available — weave them in
   naturally, don't just append a dump of the file.
@@ -86,7 +86,7 @@ repair pass, so they must be concrete enough to check mechanically, not just aes
 - Tighten wording; remove redundancy between sections; do not shorten by dropping required
   sections.
 
-## Grammar-correction step additions (runs before Control+1)
+## Grammar-correction additions (fn+2)
 
 - Remove disfluencies (um, uh, like, you know, repeated words) unless they carry meaning.
 - If a transcribed word is a near-homophone of a dictionary term, replace it with the exact

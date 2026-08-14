@@ -1,5 +1,13 @@
+export type UiPrefs = {
+  processing_mode: string;
+  interaction_sounds: boolean;
+};
+
 export type AppConfig = {
   stt_provider: string;
+  groq_api_key: string;
+  groq_stt_model: string;
+  local_whisper_model_path: string;
   gcp_project_id: string;
   gcp_location: string;
   stt_model: string;
@@ -9,8 +17,6 @@ export type AppConfig = {
   llm_api_key: string;
   openai_api_key: string;
   hotkey: string;
-  command_hotkey: string;
-  prompt_hotkey: string;
   correct_english: boolean;
   whisper_model: string;
   correction_model: string;
@@ -40,7 +46,6 @@ export type HistoryItem = {
 export type Stats = {
   total_dictations: number;
   total_words: number;
-  total_commands: number;
   total_prompts: number;
 };
 export type TranscriptSegment = {
@@ -78,10 +83,18 @@ export type AccessibilityStatus = {
   guidance: string | null;
 };
 
+export type TrainingStats = {
+  generations: number;
+  with_mistakes: number;
+  user_corrections: number;
+  log_path: string;
+};
+
 export type Status =
   | "idle"
   | "recording"
   | "transcribing"
   | "correcting"
+  | "answering"
   | "pasting"
   | "error";

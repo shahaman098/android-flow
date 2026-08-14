@@ -1,15 +1,15 @@
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 /// True while paste is in progress — dock must not call orderFrontRegardless.
 static PASTING: AtomicBool = AtomicBool::new(false);
+static LAST_DOCK_PID: AtomicI32 = AtomicI32::new(0);
 
 pub fn set_pasting(active: bool) {
     PASTING.store(active, Ordering::SeqCst);
@@ -52,12 +52,6 @@ impl Default for RecordingFlag {
     }
 }
 
-#[derive(Clone, Serialize)]
-struct DictationFallbackPayload {
-    text: String,
-    message: String,
-}
-
 pub fn capture_frontmost_app(app: &AppHandle) -> Result<String, String> {
     let target = frontmost_app()?;
     let state = app.state::<DictationTarget>();
@@ -67,13 +61,15 @@ pub fn capture_frontmost_app(app: &AppHandle) -> Result<String, String> {
         .map_err(|_| "Failed to lock target app".to_string())?;
 
     // If Hub/Dock is focused, keep the previous target app instead of aborting.
-    // Blocking here made Control+1 look completely dead while Flow Hub was open.
+    // Blocking here made fn+1 look completely dead while Flow Hub was open.
     if is_flow_app(&target.name) {
         if let Some(prev) = guard.clone() {
             return Ok(prev.name);
         }
-        // No prior target yet — still allow recording; paste will fall back to clipboard.
-        return Ok(target.name);
+        return Err(
+            "Flow is frontmost and no target app was captured. Click the text field you want Flow to write into, then try again."
+                .into(),
+        );
     }
 
     *guard = Some(target.clone());
@@ -100,26 +96,39 @@ pub fn clear_selected_text(app: &AppHandle) {
     }
 }
 
-pub fn try_capture_selected_text(app: &AppHandle) -> Result<Option<String>, String> {
-    clear_selected_text(app);
-    match capture_selected_text(app) {
-        Ok(text) => Ok(Some(text)),
-        Err(err) => {
-            // No selection is fine for prompt mode. Accessibility failures are not.
-            if err.to_lowercase().contains("no text selected") {
-                Ok(None)
-            } else {
-                Err(err)
-            }
-        }
+pub fn take_selected_text(app: &AppHandle) -> Option<String> {
+    await_selection_capture();
+    let state = app.state::<DictationTarget>();
+    state.selected_text.lock().ok().and_then(|mut g| g.take())
+}
+
+/// Set while the ⌘C that runs alongside a starting recording is still in flight.
+static CAPTURING_SELECTION: AtomicBool = AtomicBool::new(false);
+
+pub fn mark_selection_capture_started() {
+    CAPTURING_SELECTION.store(true, Ordering::SeqCst);
+}
+
+pub fn mark_selection_capture_finished() {
+    CAPTURING_SELECTION.store(false, Ordering::SeqCst);
+}
+
+/// Block until the in-flight selection capture lands.
+///
+/// The capture runs off the main thread so it cannot delay opening the microphone, which
+/// means a very short dictation could otherwise reach processing first and see no selection
+/// — silently turning a spoken edit into an insert. Reading is seconds behind the capture in
+/// practice, so this almost never actually waits.
+fn await_selection_capture() {
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    while CAPTURING_SELECTION.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
-pub fn capture_selected_text(app: &AppHandle) -> Result<String, String> {
-    let previous = app
-        .clipboard()
-        .read_text()
-        .map_err(|e| format!("Clipboard read failed before copy: {e}"))?;
+/// Copy the current selection only (no select-all). Empty / unchanged clipboard means no range.
+pub fn capture_current_selection(app: &AppHandle) -> Option<String> {
+    let previous = app.clipboard().read_text().ok();
 
     #[cfg(target_os = "macos")]
     {
@@ -128,52 +137,54 @@ pub fn capture_selected_text(app: &AppHandle) -> Result<String, String> {
                 "-e",
                 r#"tell application "System Events" to keystroke "c" using command down"#,
             ])
-            .status()
-            .map_err(|e| format!("Copy selection failed: {e}"))?;
-        if !status.success() {
-            return Err("Could not copy selection. Grant Accessibility permission.".into());
+            .status();
+        if !status.map(|s| s.success()).unwrap_or(false) {
+            return None;
         }
         thread::sleep(Duration::from_millis(80));
     }
 
-    let selected = app
-        .clipboard()
-        .read_text()
-        .map_err(|e| format!("Clipboard read failed: {e}"))?;
-
-    app.clipboard()
-        .write_text(previous)
-        .map_err(|e| format!("Clipboard restore failed: {e}"))?;
-
-    let selected = selected.trim().to_string();
-    if selected.is_empty() {
-        return Err("No text selected. Highlight text first for command mode.".into());
+    let copied = app.clipboard().read_text().ok().unwrap_or_default();
+    if let Some(previous) = previous.as_deref() {
+        let _ = app.clipboard().write_text(previous);
     }
 
-    let state = app.state::<DictationTarget>();
-    *state
-        .selected_text
-        .lock()
-        .map_err(|_| "Failed to lock selected text".to_string())? = Some(selected.clone());
+    let selected = copied.trim().to_string();
+    if selected.is_empty() || previous.as_deref().is_some_and(|prev| selected == prev.trim()) {
+        clear_selected_text(app);
+        return None;
+    }
 
-    Ok(selected)
+    if let Ok(mut guard) = app.state::<DictationTarget>().selected_text.lock() {
+        *guard = Some(selected.clone());
+    }
+    Some(selected)
 }
 
-pub fn take_selected_text(app: &AppHandle) -> Option<String> {
-    let state = app.state::<DictationTarget>();
-    state
-        .selected_text
-        .lock()
-        .ok()
-        .and_then(|mut g| g.take())
+/// Text-transform shortcuts: prefer an existing selection (so fn+1 does not Cmd+A a
+/// whole Cursor thread), otherwise select the entire focused field (⌘A) and copy it.
+pub fn capture_field_text_for_transform(app: &AppHandle) -> Result<String, String> {
+    if let Some(selected) = capture_current_selection(app) {
+        let selected = selected.trim().to_string();
+        if !selected.is_empty() {
+            let state = app.state::<DictationTarget>();
+            *state
+                .selected_text
+                .lock()
+                .map_err(|_| "Failed to lock selected text".to_string())? = Some(selected.clone());
+            return Ok(selected);
+        }
+    }
+    select_all_and_capture(app)
 }
 
-/// Control+2: select the entire document/prompt (⌘A) then copy it.
+/// Text-transform shortcuts: select the entire focused field/document (⌘A) then copy it.
 pub fn select_all_and_capture(app: &AppHandle) -> Result<String, String> {
-    let previous = app
-        .clipboard()
-        .read_text()
-        .map_err(|e| format!("Clipboard read failed before select-all: {e}"))?;
+    // Read only so the clipboard can be put back afterwards. `read_text` errors whenever the
+    // pasteboard holds something that is not text — an image, a file, a fresh login — so
+    // failing the whole transform here meant fn+1 died before it touched the field, with
+    // nothing pasted, purely because of what was copied last. Nothing to restore is fine.
+    let previous = app.clipboard().read_text().ok();
 
     #[cfg(target_os = "macos")]
     {
@@ -189,9 +200,7 @@ pub fn select_all_and_capture(app: &AppHandle) -> Result<String, String> {
             .status()
             .map_err(|e| format!("Select-all/copy failed: {e}"))?;
         if !status.success() {
-            return Err(
-                "Could not select/copy the prompt. Grant Accessibility permission.".into(),
-            );
+            return Err("Could not select/copy the prompt. Grant Accessibility permission.".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -201,14 +210,16 @@ pub fn select_all_and_capture(app: &AppHandle) -> Result<String, String> {
         .read_text()
         .map_err(|e| format!("Clipboard read failed: {e}"))?;
 
-    app.clipboard()
-        .write_text(previous)
-        .map_err(|e| format!("Clipboard restore failed: {e}"))?;
+    if let Some(previous) = previous {
+        app.clipboard()
+            .write_text(previous)
+            .map_err(|e| format!("Clipboard restore failed: {e}"))?;
+    }
 
     let selected = selected.trim().to_string();
     if selected.is_empty() {
         return Err(
-            "No prompt text found after select-all. Generate a prompt with fn+1 and paste it first, then press fn+2 (or Control+2)."
+            "No text found after select-all. Focus the field you want Flow to transform, then press the shortcut again."
                 .into(),
         );
     }
@@ -222,64 +233,37 @@ pub fn select_all_and_capture(app: &AppHandle) -> Result<String, String> {
     Ok(selected)
 }
 
-/// How the text reached the target app — decides when, or whether, the clipboard
+/// How the text reached the target app — decides how long to wait before the clipboard
 /// can be put back.
 enum PasteRoute {
-    /// Inserted directly (AX or synthesized typing); the clipboard was never consumed.
+    /// Inserted directly via AX; the clipboard was never consumed.
     Direct,
     /// Cmd+V was dispatched; the target still needs a moment to consume it.
     Clipboard,
-    /// Nothing was inserted — the result stays on the clipboard for the user to paste.
-    Retain,
 }
 
 pub fn paste_into_target_app(app: &AppHandle, text: &str) -> Result<(), String> {
     set_pasting(true);
     let result = (|| {
-        // Snapshot first: the paste routes below clobber the clipboard.
+        // Snapshot first: the paste route below clobbers the clipboard.
         let previous = app.clipboard().read_text().ok();
 
-        let route = match paste_route(app, text) {
-            Ok(route) => route,
-            Err(err) => {
-                emit_copy_fallback(app, text, &err);
-                return Err(err);
-            }
+        let route = paste_route(app, text);
+        // The clipboard is scratch space for Cmd+V, never a place to leave the result:
+        // restore it on success and failure alike.
+        let settle = match route {
+            Ok(PasteRoute::Clipboard) => Duration::from_millis(900),
+            Ok(PasteRoute::Direct) => Duration::from_millis(80),
+            Err(_) => Duration::from_millis(0),
         };
-        match route {
-            PasteRoute::Retain => {
-                let err = "Couldn't insert into the text field — result is on the clipboard (⌘V). Click the field in Cursor/WhatsApp first, and grant Flow Accessibility."
-                    .to_string();
-                emit_copy_fallback(app, text, &err);
-                return Err(err);
-            }
-            // Electron apps are unreliable — keep the transcript on the clipboard as
-            // backup instead of restoring the previous pasteboard.
-            PasteRoute::Clipboard => {
-                thread::sleep(Duration::from_millis(900));
-                return Ok(());
-            }
-            PasteRoute::Direct => thread::sleep(Duration::from_millis(80)),
-        }
-
+        thread::sleep(settle);
         if let Some(previous) = previous {
             let _ = app.clipboard().write_text(previous);
         }
-        Ok(())
+        route.map(|_| ())
     })();
     set_pasting(false);
     result
-}
-
-fn emit_copy_fallback(app: &AppHandle, text: &str, message: &str) {
-    let _ = app.clipboard().write_text(text.to_string());
-    let _ = app.emit(
-        "dictation-fallback",
-        DictationFallbackPayload {
-            text: text.to_string(),
-            message: message.to_string(),
-        },
-    );
 }
 
 fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
@@ -291,84 +275,53 @@ fn paste_route(app: &AppHandle, text: &str) -> Result<PasteRoute, String> {
     {
         let stored = target_app(app).filter(|target| !is_flow_app(&target.name));
         let Some(target) = stored else {
-            // No target app — keep text on clipboard; caller turns this into a visible error.
-            return Ok(PasteRoute::Retain);
+            return Err(
+                "No target app captured. Click the text field you want Flow to write into, then try again."
+                    .into(),
+            );
         };
 
-        // Prefer pid activation — more reliable than app name for Electron (Cursor, WhatsApp).
-        let activation_error = activate_target_pid(target.pid)
-            .or_else(|_| activate_target_by_name(&target.name))
-            .err();
+        activate_target_pid(target.pid)?;
         thread::sleep(Duration::from_millis(120));
 
-        let prefers_paste = prefers_paste_first(&target.name);
-        let mut ax_error = None;
-        let mut paste_error = None;
-
-        if prefers_paste {
-            match paste_into_pid(target.pid) {
-                Ok(()) => return Ok(PasteRoute::Clipboard),
-                Err(err) => paste_error = Some(err),
-            }
-            match activate_and_paste(&target.name) {
-                Ok(()) => return Ok(PasteRoute::Clipboard),
-                Err(err) => paste_error = paste_error.or(Some(err)),
-            }
-            match crate::macos_text::insert_text_into_focused_element(target.pid, text) {
-                Ok(()) => return Ok(PasteRoute::Direct),
-                Err(err) => ax_error = Some(err),
-            }
-        } else {
-            match crate::macos_text::insert_text_into_focused_element(target.pid, text) {
-                Ok(()) => return Ok(PasteRoute::Direct),
-                Err(err) => ax_error = Some(err),
-            }
-            match paste_into_pid(target.pid) {
-                Ok(()) => return Ok(PasteRoute::Clipboard),
-                Err(err) => paste_error = Some(err),
-            }
-            match activate_and_paste(&target.name) {
-                Ok(()) => return Ok(PasteRoute::Clipboard),
-                Err(err) => paste_error = paste_error.or(Some(err)),
-            }
+        // One insertion path per app, chosen by which one that app actually honours.
+        if prefers_paste_first(&target.name) {
+            paste_into_pid(target.pid)?;
+            return Ok(PasteRoute::Clipboard);
         }
-
-        match activate_and_type(&target.name, text) {
-            Ok(()) => {
-                let _ = app.emit(
-                    "dictation-warning",
-                    format!(
-                        "Used typed fallback for {}. This app did not accept the primary insertion path.",
-                        target.name
-                    ),
-                );
-                Ok(PasteRoute::Direct)
-            }
-            Err(type_err) => {
-                let activation_note = activation_error
-                    .map(|msg| format!(" Target activation also failed: {msg}"))
-                    .unwrap_or_default();
-                let ax_note = ax_error
-                    .map(|msg| format!(" AX insertion failed: {msg}"))
-                    .unwrap_or_default();
-                let paste_note = paste_error
-                    .map(|msg| format!(" Paste fallback failed: {msg}"))
-                    .unwrap_or_default();
-                Err(format!(
-                    "Couldn't insert into '{}'. Text is on the clipboard (⌘V). {type_err}{activation_note}{ax_note}{paste_note}",
-                    target.name,
-                ))
-            }
-        }
+        crate::macos_text::insert_text_into_focused_element(target.pid, text)?;
+        Ok(PasteRoute::Direct)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
-        Ok(PasteRoute::Retain)
+        let _ = (app, text);
+        Err("Pasting is only implemented on macOS.".into())
     }
 }
 
+/// Periodic keepalive: cheap show when the frontmost app is unchanged, full
+/// AX reposition only when the user switches apps.
+pub fn keep_bubble_visible(app: &AppHandle) {
+    if is_pasting() {
+        return;
+    }
+    let pid = frontmost_app()
+        .ok()
+        .filter(|target| !is_flow_app(&target.name))
+        .map(|target| target.pid)
+        .unwrap_or(0);
+    let last = LAST_DOCK_PID.swap(pid, Ordering::Relaxed);
+    if pid != 0 && pid == last {
+        if let Some(window) = app.get_webview_window("bubble") {
+            let _ = app.run_on_main_thread(move || {
+                let _ = window.show();
+            });
+        }
+        return;
+    }
+    show_bubble(app);
+}
 
 /// Keep the side dock visible above every app without activating Flow.
 pub fn show_bubble(app: &AppHandle) {
@@ -399,16 +352,12 @@ pub fn set_bubble_layout(app: &AppHandle, layout: &str) {
         let layout = layout.to_string();
         let _ = app.run_on_main_thread(move || {
             let (width, height, interactive) = match layout.as_str() {
-                "listening" => (76.0, 304.0, true),
-                "fallback" => (112.0, 44.0, true),
-                _ => (60.0, 120.0, false),
+                "listening" => (64.0, 232.0, true),
+                _ => (50.0, 100.0, false),
             };
             let _ = window.set_focusable(false);
             let _ = window.set_ignore_cursor_events(!interactive);
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width,
-                height,
-            }));
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
             position_dock_to_cursor_screen(&window);
             let _ = window.show();
             #[cfg(target_os = "macos")]
@@ -420,7 +369,9 @@ pub fn set_bubble_layout(app: &AppHandle, layout: &str) {
 #[cfg(target_os = "macos")]
 pub fn configure_dock_overlay(window: &WebviewWindow) {
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
-    let Ok(ns_window) = window.ns_window() else { return; };
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
     unsafe {
         let ns_window: &NSWindow = &*ns_window.cast();
         let behavior = (ns_window.collectionBehavior()
@@ -434,14 +385,15 @@ pub fn configure_dock_overlay(window: &WebviewWindow) {
         ns_window.setCanHide(false);
         ns_window.setAlphaValue(1.0);
         ns_window.setLevel(101);
-        if !ns_window.isVisible() { ns_window.setIsVisible(true); }
+        if !ns_window.isVisible() {
+            ns_window.setIsVisible(true);
+        }
         // Never steal focus during paste — orderFrontRegardless was racing Cmd+V.
         if !is_pasting() {
             ns_window.orderFrontRegardless();
         }
     }
 }
-
 
 /// Dock stays on screen while Flow is running (idle outline). Visibility is not toggled off.
 pub fn hide_bubble(app: &AppHandle) {
@@ -452,10 +404,7 @@ pub fn hide_bubble(app: &AppHandle) {
 /// Place the dock on the right edge of the monitor containing the active work
 /// window. Falls back to cursor/current/primary monitor when AX bounds are absent.
 pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
-    let monitors = window
-        .available_monitors()
-        .ok()
-        .unwrap_or_default();
+    let monitors = window.available_monitors().ok().unwrap_or_default();
     let frontmost_bounds = frontmost_app()
         .ok()
         .filter(|target| !is_flow_app(&target.name))
@@ -478,15 +427,15 @@ pub fn position_dock_to_cursor_screen(window: &WebviewWindow) {
     let origin = monitor.position();
     let scale = monitor.scale_factor();
     // Prefer the window's current logical size (Bubble expands/collapses).
-    let mut width = 60.0;
-    let mut height = 120.0;
+    let mut width = 50.0;
+    let mut height = 100.0;
     if let Ok(outer) = window.outer_size() {
         width = outer.width as f64 / scale;
         height = outer.height as f64 / scale;
     }
     if width < 20.0 || height < 20.0 {
-        width = 60.0;
-        height = 120.0;
+        width = 50.0;
+        height = 100.0;
     }
     let x = origin.x as f64 / scale + size.width as f64 / scale - width - 28.0;
     let y = origin.y as f64 / scale + (size.height as f64 / scale - height) / 2.0;
@@ -534,11 +483,6 @@ fn front_window_bounds_for_pid(pid: i32) -> Result<FrontWindowBounds, String> {
     }
 }
 
-/// Initial right-edge placement — follows the active work window when possible.
-pub fn position_dock_default(window: &WebviewWindow) {
-    position_dock_to_cursor_screen(window);
-}
-
 /// Global mouse location in top-left-origin physical pixels (Tauri monitor space).
 fn cursor_screen_point() -> Option<(f64, f64)> {
     #[cfg(target_os = "macos")]
@@ -577,43 +521,11 @@ pub fn is_flow_app_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("Flow") || name.eq_ignore_ascii_case("flow-app")
 }
 
-pub fn frontmost_app_name() -> Result<String, String> {
-    Ok(frontmost_app()?.name)
-}
-
 pub fn frontmost_app() -> Result<TargetApp, String> {
-    // Prefer NSWorkspace — fast, no AppleScript, works before Accessibility is granted
-    // for System Events (still need AX for paste, but capture itself is reliable).
-    if let Some(target) = frontmost_app_nsworkspace() {
-        return Ok(target);
-    }
-
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            r#"tell application "System Events" to tell first application process whose frontmost is true to return name & linefeed & (unix id as text)"#,
-        ])
-        .output()
-        .map_err(|e| format!("Could not read frontmost app: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Could not read frontmost app. Grant Accessibility permission to Flow. {stderr}"
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines();
-    let name = lines.next().unwrap_or("").trim().to_string();
-    let pid_raw = lines.next().unwrap_or("").trim();
-    if name.is_empty() {
-        return Err("Frontmost app name was empty.".into());
-    }
-    let pid = pid_raw
-        .parse::<i32>()
-        .map_err(|_| format!("Frontmost app pid was invalid: {pid_raw}"))?;
-    Ok(TargetApp { name, pid })
+    // NSWorkspace only — fast, no AppleScript, and works before Accessibility is granted
+    // for System Events.
+    frontmost_app_nsworkspace()
+        .ok_or_else(|| "Could not read the frontmost app from NSWorkspace.".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -647,29 +559,19 @@ fn activate_target_pid(pid: i32) -> Result<(), String> {
         .map_err(|e| format!("Could not reactivate target app: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Could not reactivate target app by pid {pid}. {stderr}"));
-    }
-    Ok(())
-}
-
-fn activate_target_by_name(app_name: &str) -> Result<(), String> {
-    let escaped = escape_applescript_string(app_name);
-    let script = format!(r#"tell application "{escaped}" to activate"#);
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map_err(|e| format!("Could not activate '{app_name}': {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Could not activate '{app_name}'. {stderr}"));
+        return Err(format!(
+            "Could not reactivate target app by pid {pid}. {stderr}"
+        ));
     }
     Ok(())
 }
 
 /// Soft-refocus Electron composers (Cursor chat, WhatsApp) by clicking near the
 /// bottom-center of the front window, then paste with Cmd+V.
-/// Hard AX focus gates are skipped — Cursor often reports no focused field after
-/// a long STT round-trip even when the chat input is visible.
+///
+/// Do not hard-fail on AX focused-field checks. Cursor / WhatsApp / Claude often
+/// report no focused input after a long LLM round-trip (fn+1 / fn+2) even when the
+/// composer is visible — that was making correction look completely broken.
 fn paste_into_pid(pid: i32) -> Result<(), String> {
     let script = format!(
         r#"
@@ -690,8 +592,8 @@ delay 0.12
         ));
     }
 
-    // Cursor/WhatsApp lose the text-field focus during cloud processing.
-    // Click the lower composer area, then send Cmd+V.
+    // Cursor/WhatsApp lose the text-field focus during LLM processing.
+    // Click the lower composer area, then send Cmd+V regardless of AX focus.
     let _ = crate::macos_text::click_composer_area(pid);
     thread::sleep(Duration::from_millis(140));
 
@@ -700,7 +602,6 @@ delay 0.12
         let _ = crate::macos_text::click_composer_area_offset(pid, 0.5, 0.82);
         thread::sleep(Duration::from_millis(120));
     }
-    crate::macos_text::has_focused_input_target(pid)?;
 
     if let Err(err) = crate::macos_text::post_command_v() {
         // Fall back to System Events if CGEvent is blocked.
@@ -726,140 +627,9 @@ fn prefers_paste_first(app_name: &str) -> bool {
     // Browser chat surfaces and Electron-style chat apps usually accept paste
     // more reliably than AXValue replacement on focused contenteditable fields.
     [
-        "edge",
-        "chrome",
-        "safari",
-        "firefox",
-        "arc",
-        "claude",
-        "chatgpt",
-        "whatsapp",
-        "slack",
-        "discord",
-        "teams",
-        "notion",
-        "cursor",
-        "code",
+        "edge", "chrome", "safari", "firefox", "arc", "claude", "chatgpt", "whatsapp", "slack",
+        "discord", "teams", "notion", "cursor", "code",
     ]
     .iter()
     .any(|needle| name.contains(needle))
-}
-
-fn activate_and_paste(app_name: &str) -> Result<(), String> {
-    let escaped = escape_applescript_string(app_name);
-    let script = format!(
-        r#"
-tell application "{escaped}" to activate
-delay 0.12
-"#
-    );
-
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map_err(|e| format!("Paste failed: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Activate '{app_name}' failed. Grant Accessibility permission to Flow. {stderr}"
-        ));
-    }
-
-    if let Ok(target) = frontmost_app() {
-        if !is_flow_app(&target.name) {
-            let _ = crate::macos_text::click_composer_area(target.pid);
-            thread::sleep(Duration::from_millis(120));
-        }
-    }
-
-    if crate::macos_text::post_command_v().is_err() {
-        let paste = Command::new("osascript")
-            .args([
-                "-e",
-                r#"tell application "System Events" to keystroke "v" using command down"#,
-            ])
-            .output()
-            .map_err(|e| format!("Paste keystroke failed: {e}"))?;
-        if !paste.status.success() {
-            let stderr = String::from_utf8_lossy(&paste.stderr);
-            return Err(format!(
-                "Paste into '{app_name}' failed. Text is on the clipboard (⌘V). {stderr}"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn activate_and_type(app_name: &str, text: &str) -> Result<(), String> {
-    let escaped = escape_applescript_string(app_name);
-    let chunks = typing_chunks(text, 40);
-    let mut script = format!("tell application \"{escaped}\" to activate\ndelay 0.08\n");
-    script.push_str("tell application \"System Events\"\n");
-    for chunk in chunks {
-        match chunk {
-            TypingChunk::Text(value) => {
-                let value = escape_applescript_string(&value);
-                script.push_str(&format!("keystroke \"{value}\"\n"));
-            }
-            TypingChunk::Return => script.push_str("key code 36\n"),
-            TypingChunk::Tab => script.push_str("key code 48\n"),
-        }
-    }
-    script.push_str("end tell\n");
-
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map_err(|e| format!("Typed fallback failed: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Typed fallback failed for '{app_name}'. {stderr}"));
-    }
-
-    Ok(())
-}
-
-enum TypingChunk {
-    Text(String),
-    Return,
-    Tab,
-}
-
-fn typing_chunks(text: &str, max_chunk_len: usize) -> Vec<TypingChunk> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-
-    let flush = |out: &mut Vec<TypingChunk>, current: &mut String| {
-        if !current.is_empty() {
-            out.push(TypingChunk::Text(std::mem::take(current)));
-        }
-    };
-
-    for ch in text.chars() {
-        match ch {
-            '\n' => {
-                flush(&mut out, &mut current);
-                out.push(TypingChunk::Return);
-            }
-            '\t' => {
-                flush(&mut out, &mut current);
-                out.push(TypingChunk::Tab);
-            }
-            _ => {
-                current.push(ch);
-                if current.chars().count() >= max_chunk_len {
-                    flush(&mut out, &mut current);
-                }
-            }
-        }
-    }
-    flush(&mut out, &mut current);
-    out
-}
-
-fn escape_applescript_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }

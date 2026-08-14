@@ -41,14 +41,19 @@ impl SCStreamOutputTrait for AudioHandler {
             // Defensive: if the OS ever delivers non-interleaved multi-channel buffers anyway,
             // downmix to mono by averaging channels frame-by-frame.
             n => {
-                let channels: Vec<&[u8]> = (0..n).filter_map(|i| list.get(i)).map(|b| b.data()).collect();
+                let channels: Vec<&[u8]> = (0..n)
+                    .filter_map(|i| list.get(i))
+                    .map(|b| b.data())
+                    .collect();
                 let frame_count = channels.iter().map(|c| c.len() / 4).min().unwrap_or(0);
                 let mut out = Vec::with_capacity(frame_count);
                 for frame in 0..frame_count {
                     let start = frame * 4;
                     let sum: f32 = channels
                         .iter()
-                        .map(|c| f32::from_ne_bytes([c[start], c[start + 1], c[start + 2], c[start + 3]]))
+                        .map(|c| {
+                            f32::from_ne_bytes([c[start], c[start + 1], c[start + 2], c[start + 3]])
+                        })
                         .sum();
                     out.push(f32_to_i16(sum / channels.len() as f32));
                 }
@@ -82,8 +87,8 @@ pub struct SystemAudioHandle {
 }
 
 pub fn start(app: &AppHandle) -> Result<SystemAudioHandle, String> {
-    let content = SCShareableContent::get()
-        .map_err(|e| format!("Could not list shareable content: {e}"))?;
+    let content =
+        SCShareableContent::get().map_err(|e| format!("Could not list shareable content: {e}"))?;
     let display = content
         .displays()
         .into_iter()

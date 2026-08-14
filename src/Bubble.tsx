@@ -14,18 +14,30 @@ function formatElapsed(startedAtEpochSecs: string | null): string {
   return `${mm}:${ss}`;
 }
 
-type Mode = "vibe" | "vibe_refine" | "dictate" | "command" | "prompt";
+type Mode =
+  | "vibe_text"
+  | "correct_text"
+  | "meeting_answer"
+  | "dictate";
 type BarState = "idle" | "listening" | "processing" | "error";
-type VisualState = BarState | "fallback";
-type FallbackPayload = { text: string; message: string };
+type VisualState = BarState;
 
 const WAVE_BARS = 9;
+
+function parseMode(payload: string): Mode {
+  if (payload === "vibe_text") return "vibe_text";
+  if (payload === "correct_text") return "correct_text";
+  if (payload === "meeting_answer") return "meeting_answer";
+  if (payload === "dictate") return "dictate";
+  return "dictate";
+}
 
 function barStateFromStatus(status: Status): BarState {
   if (status === "recording") return "listening";
   if (
     status === "transcribing" ||
     status === "correcting" ||
+    status === "answering" ||
     status === "pasting"
   ) {
     return "processing";
@@ -34,7 +46,7 @@ function barStateFromStatus(status: Status): BarState {
   return "idle";
 }
 
-async function layoutDock(layout: "idle" | "listening" | "fallback"): Promise<void> {
+async function layoutDock(layout: "idle" | "listening"): Promise<void> {
   // Rust owns size, click-through, position, window level, and Spaces behavior.
   // Keeping one owner avoids competing JS/native keepalive loops.
   await invoke("set_bubble_layout", { layout });
@@ -71,7 +83,7 @@ function MicIcon() {
 
 export default function Bubble() {
   const [status, setStatus] = useState<Status>("idle");
-  const [mode, setMode] = useState<Mode>("vibe");
+  const [mode, setMode] = useState<Mode>("dictate");
   const [error, setError] = useState("");
   const [micLevel, setMicLevel] = useState(0);
   const [meetingStatus, setMeetingStatus] = useState<MeetingStatus>({
@@ -80,8 +92,6 @@ export default function Bubble() {
     started_at: null,
   });
   const [elapsed, setElapsed] = useState("");
-  const [fallbackText, setFallbackText] = useState("");
-  const [fallbackCopied, setFallbackCopied] = useState(false);
   const statusRef = useRef<Status>("idle");
 
   // The always-visible bubble owns dictation capture. Hidden WKWebViews can leave
@@ -89,13 +99,8 @@ export default function Bubble() {
   useDictationEngine(true);
 
   const barState = barStateFromStatus(status);
-  const visualState: VisualState = fallbackText ? "fallback" : barState;
-  const dockLayout =
-    visualState === "listening"
-      ? "listening"
-      : visualState === "fallback"
-        ? "fallback"
-        : "idle";
+  const visualState: VisualState = barState;
+  const dockLayout = visualState === "listening" ? "listening" : "idle";
   const heights = useMemo(() => waveHeights(micLevel), [micLevel]);
 
   useEffect(() => {
@@ -129,52 +134,48 @@ export default function Bubble() {
 
       unsubs.push(
         await listen<string>("recording-start", (event) => {
-          const next: Mode =
-            event.payload === "vibe_refine"
-              ? "vibe_refine"
-              : event.payload === "vibe"
-                ? "vibe"
-                : event.payload === "command"
-                  ? "command"
-                  : event.payload === "prompt"
-                    ? "prompt"
-                    : event.payload === "dictate"
-                      ? "dictate"
-                      : "vibe";
+          const next = parseMode(event.payload);
           setMode(next);
           setError("");
-          setFallbackText("");
-          setFallbackCopied(false);
           setMicLevel(0);
           setStatus("recording");
         }),
       );
       unsubs.push(
         await listen<string>("session-mode", (event) => {
-          if (event.payload === "vibe_refine") {
-            setMode("vibe_refine");
+          if (event.payload === "vibe_text") {
+            setMode("vibe_text");
             setError("");
-            setFallbackText("");
-            setFallbackCopied(false);
             setStatus("correcting");
-          } else if (event.payload === "vibe") {
-            setMode("vibe");
+          } else if (event.payload === "correct_text") {
+            setMode("correct_text");
+            setError("");
+            setStatus("correcting");
+          } else if (event.payload === "meeting_answer") {
+            setMode("meeting_answer");
+            setError("");
+            setStatus("answering");
           }
         }),
       );
       unsubs.push(
         await listen<string>("recording-stop", () => {
-          setMicLevel(0);
-          setStatus("transcribing");
+          // Keep the waveform visible until the recorder has actually stopped.
+          // `useDictationEngine` emits `engine-status: transcribing` once it has
+          // finalized audio and started cloud/local processing.
         }),
       );
       unsubs.push(
         await listen<string>("recording-cancel", (event) => {
-          if (event.payload === "refine") return;
+          if (
+            event.payload === "vibe_text" ||
+            event.payload === "correct_text" ||
+            event.payload === "meeting_answer"
+          ) {
+            return;
+          }
           setMicLevel(0);
           setError("");
-          setFallbackText("");
-          setFallbackCopied(false);
           setStatus("idle");
         }),
       );
@@ -192,6 +193,7 @@ export default function Bubble() {
           if (
             value === "transcribing" ||
             value === "correcting" ||
+            value === "answering" ||
             value === "pasting"
           ) {
             setStatus(value);
@@ -214,15 +216,6 @@ export default function Bubble() {
         }),
       );
       unsubs.push(
-        await listen<FallbackPayload>("dictation-fallback", (event) => {
-          setFallbackText(event.payload.text);
-          setFallbackCopied(false);
-          setMicLevel(0);
-          setError(event.payload.message);
-          setStatus("error");
-        }),
-      );
-      unsubs.push(
         await listen<string>("dictation-error", (event) => {
           setMicLevel(0);
           setStatus("error");
@@ -241,7 +234,9 @@ export default function Bubble() {
           // the listening UI with a red error pill.
           setError(event.payload);
           window.setTimeout(() => {
-            setError("");
+            if (statusRef.current !== "error") {
+              setError("");
+            }
           }, 4500);
         }),
       );
@@ -250,8 +245,6 @@ export default function Bubble() {
           setMicLevel(0);
           setStatus("idle");
           setError("");
-          setFallbackText("");
-          setFallbackCopied(false);
         }),
       );
       unsubs.push(
@@ -269,21 +262,21 @@ export default function Bubble() {
   const meetingActive = meetingStatus.phase === "capturing";
   const title = meetingActive
     ? `Transcribing ${meetingStatus.app_name ?? "meeting"}… ${elapsed} — text only, no audio saved`
-    : visualState === "fallback"
-      ? fallbackCopied
-        ? "Copied. Paste manually with ⌘V."
-        : error || "Insertion failed. Click to copy, then paste manually."
     : barState === "error"
       ? error || "Error"
       : barState === "listening"
         ? "Listening… · Stop ■ · Cancel ×"
         : barState === "processing"
-          ? mode === "vibe_refine"
-            ? "Refining…"
+          ? mode === "vibe_text"
+            ? "Creating prompt…"
+            : mode === "correct_text"
+              ? "Correcting…"
+              : mode === "meeting_answer"
+                ? "Answering…"
             : status === "pasting"
               ? "Inserting…"
               : "Processing…"
-          : "Flow — hold fn · fn+1 auto-prompt · fn+2 refine";
+          : "Flow — fn raw · fn+1 prompt · fn+2 correct · fn+3 answer";
 
   async function onStop(e: React.MouseEvent<HTMLButtonElement>) {
     e.stopPropagation();
@@ -303,23 +296,6 @@ export default function Bubble() {
     }
   }
 
-  async function onCopyFallback(e: React.MouseEvent<HTMLButtonElement>) {
-    e.stopPropagation();
-    if (!fallbackText) return;
-    try {
-      await invoke("copy_text_to_clipboard", { text: fallbackText });
-      setFallbackCopied(true);
-      window.setTimeout(() => {
-        setFallbackText("");
-        setFallbackCopied(false);
-        setStatus("idle");
-        setError("");
-      }, 1800);
-    } catch (err) {
-      setError(`Copy failed: ${err}`);
-    }
-  }
-
   return (
     <div
       className={`flow-bar state-${visualState}${meetingActive ? " meeting-active" : ""}`}
@@ -328,18 +304,7 @@ export default function Bubble() {
       aria-label={title}
     >
       <div className="flow-bar-shell">
-        {visualState === "fallback" ? (
-          <button
-            type="button"
-            className="flow-bar-copy-pill"
-            aria-label="Copy dictated text"
-            onClick={onCopyFallback}
-          >
-            {fallbackCopied ? "Copied" : "Copy"}
-          </button>
-        ) : null}
-
-        {(barState === "idle" || barState === "error") && visualState !== "fallback" ? (
+        {barState === "idle" || barState === "error" ? (
           <div className="flow-bar-idle-mark" aria-hidden>
             {barState === "error" ? (
               <span className="flow-bar-error-bang">!</span>

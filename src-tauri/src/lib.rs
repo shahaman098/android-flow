@@ -1,33 +1,36 @@
 mod cloud_api;
 mod config;
 mod dictate;
+mod dictation_post;
 mod focus;
 #[cfg(target_os = "macos")]
-mod macos_text;
-#[cfg(target_os = "macos")]
 mod macos_fn;
+#[cfg(target_os = "macos")]
+mod macos_text;
 mod meeting;
 mod store;
+mod training;
 mod stt_gcp;
+mod stt_groq;
+mod stt_local;
+mod stt_whisper;
+mod stt_whisper_server;
 #[cfg(target_os = "macos")]
 mod system_audio;
 mod vibe_context;
 
+use focus::{hide_bubble, show_bubble, DictationTarget, RecordingFlag};
 use serde::Serialize;
 #[cfg(target_os = "macos")]
 use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
-use focus::{
-    clear_selected_text, hide_bubble, show_bubble, DictationTarget, RecordingFlag,
-};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     ActivationPolicy, Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -52,28 +55,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(
-            // Keep Control+1/2 as optional fallbacks; primary hotkey is fn (see macos_fn).
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
-                    let vibe = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1);
-                    let refine = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2);
-                    if shortcut == &vibe {
-                        // `hands_free` = tap to start, tap again to stop. Off = hold.
-                        // This is the only path the setting applies to; the primary fn
-                        // hotkey is inherently hold-style (see macos_fn).
-                        let hands_free = config::load_config().hands_free;
-                        handle_toggle_shortcut(app, event.state, hands_free, "vibe");
-                    } else if shortcut == &refine {
-                        if event.state == ShortcutState::Pressed {
-                            handle_vibe_refine(app);
-                        }
-                    }
-                })
-                .build(),
-        )
         .invoke_handler(tauri::generate_handler![
             dictate::get_config,
+            dictate::get_ui_prefs,
             dictate::save_user_config,
             dictate::get_readiness,
             dictate::verify_stt_connection,
@@ -83,8 +67,6 @@ pub fn run() {
             dictate::process_transcript,
             dictate::hide_bubble_window,
             dictate::transcribe_partial,
-            hub_vibe_press,
-            hub_vibe_release,
             flow_bar_stop,
             flow_bar_cancel,
             reset_recording_session,
@@ -95,7 +77,6 @@ pub fn run() {
             hide_hub_window,
             open_accessibility_settings,
             open_microphone_settings,
-            quit_wispr_flow_conflict,
             check_accessibility_trusted,
             get_accessibility_status,
             store::get_store,
@@ -106,6 +87,8 @@ pub fn run() {
             store::upsert_style,
             store::clear_history,
             store::remove_meeting_transcript,
+            training::get_training_stats,
+            training::open_training_folder,
             store::clear_meetings,
             meeting::meeting_get_status,
             meeting::meeting_confirm_notified,
@@ -117,7 +100,7 @@ pub fn run() {
             meeting::open_screen_recording_settings
         ])
         .setup(|app| {
-            // Regular (not Accessory) so Flow appears in the Dock / Cmd+Tab with a real Hub window.
+            // Accessory: no Dock icon; the tray + Hub window are the UI.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);
 
@@ -128,7 +111,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("Flow — hold fn activate · fn+1 auto-prompt · fn+2 refine")
+                .tooltip("Flow — fn raw · fn+1 prompt · fn+2 correct · fn+3 answer")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => show_hub_window(app),
@@ -145,13 +128,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-
-            let _ = app
-                .global_shortcut()
-                .register(Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1));
-            let _ = app
-                .global_shortcut()
-                .register(Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2));
 
             // Install the macOS fn listener. If Accessibility is missing, surface a
             // diagnostic in the Hub instead of bouncing the user into Settings on every launch.
@@ -188,7 +164,7 @@ pub fn run() {
                         if focus::is_pasting() {
                             continue;
                         }
-                        focus::show_bubble(&dock_app);
+                        focus::keep_bubble_visible(&dock_app);
                     }
                 });
             }
@@ -199,6 +175,10 @@ pub fn run() {
         .expect("error while building Flow");
 
     app.run(|handle, event| {
+        // The resident Whisper server holds ~500MB; do not leave it orphaned.
+        if let tauri::RunEvent::Exit = event {
+            stt_whisper_server::shutdown();
+        }
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
             show_hub_window(handle);
@@ -237,41 +217,44 @@ fn prewarm_local_processing() {
     if cloud_api::uses_cloud(&cfg) {
         return;
     }
+    // Load the Whisper model during startup rather than on the user's first press.
+    if let Some(model) = stt_whisper::prewarm_model_path(&cfg) {
+        stt_whisper_server::prewarm(model, stt_whisper::WHISPER_THREADS);
+    }
     std::thread::spawn(|| {
         let _ = stt_gcp::adc_access_token();
     });
 }
 
-/// Start mic session for `dictate` (activate) or `vibe` (auto-prompt).
+/// Start mic session for raw `dictate`.
 pub fn begin_recording_session(app: &tauri::AppHandle, mode: &str) -> Result<(), String> {
-    clear_selected_text(app);
-
     // Capture the typing target BEFORE the Flow Bar can become frontmost.
     // NSWorkspace path is fast (~ms); do not open Hub here — that stole focus and
     // made paste land on clipboard-only.
-    match focus::capture_frontmost_app(app) {
-        Ok(name) if focus::is_flow_app_name(&name) => {
-            let _ = app.emit(
-                "dictation-warning",
-                "Click a text field in Cursor/WhatsApp first — Flow was frontmost, so text may stay on the clipboard (⌘V).",
-            );
-        }
-        Ok(name) => {
-            let _ = app.emit("dictation-status", format!("recording → {name}"));
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "dictation-warning",
-                format!("{err} Recording anyway — grant Accessibility if paste fails."),
-            );
-        }
-    }
+    // No target app means nothing can receive the result, so refuse the session rather than
+    // recording speech that has nowhere to land.
+    let target = focus::capture_frontmost_app(app)?;
+    let _ = app.emit("dictation-status", format!("recording → {target}"));
 
     hide_hub_for_work(app);
     show_bubble(app);
 
+    // Open the mic before anything that blocks. Capturing the selection first cost ~300ms of
+    // `osascript` on the main thread, and every one of those milliseconds was speech the
+    // recorder never heard — that is what chopped the first word off dictations.
     app.emit("recording-start", mode)
         .map_err(|e| format!("Failed to start recording UI: {e}"))?;
+
+    // Copy any already-selected range for spoken edit. No select-all — empty means insert.
+    // Only read at process time (after STT), so it has seconds to finish off-thread. Clear
+    // it first so a slow capture can never let the previous session's selection be reused.
+    focus::clear_selected_text(app);
+    focus::mark_selection_capture_started();
+    let selection_handle = app.clone();
+    std::thread::spawn(move || {
+        let _ = focus::capture_current_selection(&selection_handle);
+        focus::mark_selection_capture_finished();
+    });
 
     Ok(())
 }
@@ -280,68 +263,14 @@ pub fn stop_recording_session(app: &tauri::AppHandle, mode: &str) {
     let _ = app.emit("recording-stop", mode);
 }
 
-fn begin_vibe_session(app: &tauri::AppHandle) -> Result<(), String> {
-    begin_recording_session(app, "vibe")
-}
-
-fn handle_toggle_shortcut(
-    app: &tauri::AppHandle,
-    state: ShortcutState,
-    hands_free: bool,
-    mode: &str,
-) {
-    let flag = app.state::<RecordingFlag>();
-    let mut active = match flag.active.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            let _ = app.emit(
-                "dictation-error",
-                "Internal error: recording lock poisoned. Restart Flow.",
-            );
-            return;
-        }
-    };
-
-    match state {
-        ShortcutState::Pressed => {
-            if hands_free {
-                if *active {
-                    *active = false;
-                    let _ = app.emit("recording-stop", mode);
-                } else if let Err(err) = begin_vibe_session(app) {
-                    *active = false;
-                    hide_bubble(app);
-                    let _ = app.emit("dictation-error", err);
-                } else {
-                    *active = true;
-                }
-            } else if !*active {
-                if let Err(err) = begin_vibe_session(app) {
-                    *active = false;
-                    hide_bubble(app);
-                    let _ = app.emit("dictation-error", err);
-                } else {
-                    *active = true;
-                }
-            }
-        }
-        ShortcutState::Released => {
-            if !hands_free && *active {
-                *active = false;
-                let _ = app.emit("recording-stop", mode);
-            }
-        }
-    }
-}
-
-/// fn+2 / Control+2: no mic — select entire prompt, extract context/, refine, paste.
-pub fn handle_vibe_refine(app: &tauri::AppHandle) {
+/// fn+1: no mic — select rough text, extract context/, create a Vibe Coding prompt, paste.
+pub fn handle_vibe_prompt(app: &tauri::AppHandle) {
     let flag = app.state::<RecordingFlag>();
     if let Ok(active) = flag.active.lock() {
         if *active {
             let _ = app.emit(
                 "dictation-error",
-                "Finish or cancel the fn recording before using fn+2 refine.",
+                "Finish or cancel the fn recording before using fn+1 prompt.",
             );
             return;
         }
@@ -349,25 +278,96 @@ pub fn handle_vibe_refine(app: &tauri::AppHandle) {
 
     show_bubble(app);
     hide_hub_for_work(app);
-    let _ = app.emit("session-mode", "vibe_refine");
+    let _ = app.emit("session-mode", "vibe_text");
+    let _ = app.emit("dictation-status", "fn+1 prompt");
+
+    run_text_transform(app, dictate::prepare_vibe_text, |app| {
+        Box::pin(dictate::process_vibe_text(app))
+    });
+}
+
+/// fn+2: no mic — select text, grammar-correct it, paste.
+pub fn handle_correct_text(app: &tauri::AppHandle) {
+    let flag = app.state::<RecordingFlag>();
+    if let Ok(active) = flag.active.lock() {
+        if *active {
+            let _ = app.emit(
+                "dictation-error",
+                "Finish or cancel the fn recording before using fn+2 correction.",
+            );
+            return;
+        }
+    }
+
+    show_bubble(app);
+    hide_hub_for_work(app);
+    let _ = app.emit("session-mode", "correct_text");
     let _ = app.emit("dictation-status", "correcting");
 
-    match dictate::prepare_vibe_refine(app) {
+    run_text_transform(app, dictate::prepare_correct_text, |app| {
+        Box::pin(dictate::process_correct_text(app))
+    });
+}
+
+/// Shared body of the fn+1 / fn+2 text chords: capture the focused field, then transform it.
+///
+/// `prepare` drives ⌘A/⌘C through `osascript` and sleeps ~150ms. Running that on the main
+/// thread stalled the very event loop the fn tap dispatches through, so a chord pressed
+/// while a previous one was still capturing was dropped entirely.
+fn run_text_transform<P, S>(app: &tauri::AppHandle, prepare: P, start: S)
+where
+    P: FnOnce(&tauri::AppHandle) -> Result<String, String> + Send + 'static,
+    S: FnOnce(
+            tauri::AppHandle,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + 'static,
+{
+    let app_handle = app.clone();
+    std::thread::spawn(move || match prepare(&app_handle) {
         Ok(text) => {
-            let _ = app.emit("partial-transcript", &text);
-            let app_handle = app.clone();
+            let _ = app_handle.emit("partial-transcript", &text);
+            let run_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = dictate::process_vibe_refine(app_handle.clone()).await {
-                    hide_bubble(&app_handle);
-                    let _ = app_handle.emit("dictation-error", err);
+                if let Err(err) = start(run_handle.clone()).await {
+                    hide_bubble(&run_handle);
+                    let _ = run_handle.emit("dictation-error", err);
                 }
             });
         }
         Err(err) => {
-            hide_bubble(app);
-            let _ = app.emit("dictation-error", err);
+            hide_bubble(&app_handle);
+            let _ = app_handle.emit("dictation-error", err);
+        }
+    });
+}
+
+/// fn+3: no mic — answer the latest question detected in the live conversation transcript.
+pub fn handle_meeting_answer(app: &tauri::AppHandle) {
+    let flag = app.state::<RecordingFlag>();
+    if let Ok(active) = flag.active.lock() {
+        if *active {
+            let _ = app.emit(
+                "dictation-error",
+                "Finish or cancel the fn recording before using fn+3 live answer.",
+            );
+            return;
         }
     }
+
+    show_bubble(app);
+    hide_hub_for_work(app);
+    let _ = app.emit("session-mode", "meeting_answer");
+    let _ = app.emit("dictation-status", "answering");
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = dictate::process_meeting_answer(app_handle.clone()).await {
+            hide_bubble(&app_handle);
+            let _ = app_handle.emit("dictation-error", err);
+        }
+    });
 }
 
 fn show_hub_window(app: &tauri::AppHandle) {
@@ -390,20 +390,6 @@ fn hide_hub_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
-}
-
-/// Hub "Hold to record" button — same path as Control+1 press.
-#[tauri::command]
-fn hub_vibe_press(app: tauri::AppHandle) -> Result<(), String> {
-    handle_toggle_shortcut(&app, ShortcutState::Pressed, false, "vibe");
-    Ok(())
-}
-
-/// Hub "Hold to record" button — same path as Control+1 release.
-#[tauri::command]
-fn hub_vibe_release(app: tauri::AppHandle) -> Result<(), String> {
-    handle_toggle_shortcut(&app, ShortcutState::Released, false, "vibe");
-    Ok(())
 }
 
 /// Flow Bar Stop — finish capture and process (same as releasing fn).
@@ -483,15 +469,12 @@ fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), Str
 
 #[tauri::command]
 fn log_dictation_error(message: String) -> Result<(), String> {
-    use std::io::Write;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let mut file = std::fs::File::create("/tmp/flow-dictation-last-error.log")
-        .map_err(|e| format!("Could not open dictation error log: {e}"))?;
-    writeln!(file, "{timestamp} {message}")
-        .map_err(|e| format!("Could not write dictation error log: {e}"))
+    let path = crate::config::data_dir()?.join("last-error.log");
+    crate::config::atomic_write_private(&path, &format!("{timestamp} {message}\n"))
 }
 
 #[tauri::command]
@@ -577,18 +560,4 @@ fn current_app_bundle_path(path: &std::path::Path) -> Option<std::path::PathBuf>
         }
     }
     None
-}
-
-/// Kill commercial Wispr Flow which steals mic/hotkeys from our Flow.app.
-#[tauri::command]
-fn quit_wispr_flow_conflict() -> Result<String, String> {
-    let status = std::process::Command::new("pkill")
-        .args(["-f", "/Applications/Wispr Flow.app"])
-        .status()
-        .map_err(|e| format!("pkill failed: {e}"))?;
-    if status.success() {
-        Ok("Quit commercial Wispr Flow. Try hold fn again.".into())
-    } else {
-        Ok("Commercial Wispr Flow was not running.".into())
-    }
 }

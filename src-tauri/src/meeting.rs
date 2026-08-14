@@ -66,6 +66,12 @@ pub struct MeetingStatus {
     pub started_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MeetingQuestionContext {
+    pub question: String,
+    pub transcript: String,
+}
+
 const KNOWN_APPS: &[(&str, &str)] = &[
     ("zoom.us", "Zoom"),
     ("MSTeams", "Microsoft Teams"),
@@ -151,18 +157,12 @@ pub fn meeting_start_capture(app: AppHandle) -> Result<MeetingStatus, String> {
 
     #[cfg(target_os = "macos")]
     {
-        match crate::system_audio::start(&app) {
-            Ok(handle) => inner.system_audio = Some(handle),
-            Err(err) => {
-                // Mic-only fallback: system audio may be unavailable (e.g. permission not
-                // yet granted) without blocking the session — the Hub already surfaces the
-                // Screen Recording permission banner separately.
-                let _ = app.emit(
-                    "meeting-error",
-                    format!("System audio unavailable, continuing mic-only: {err}"),
-                );
-            }
-        }
+        // No mic-only degradation: a capture without system audio is not the session the
+        // user asked for, so surface it instead of silently recording half the conversation.
+        let handle = crate::system_audio::start(&app).map_err(|err| {
+            format!("System audio unavailable: {err} Grant Screen Recording to Flow, then try again.")
+        })?;
+        inner.system_audio = Some(handle);
     }
 
     emit_status(&app, &inner);
@@ -189,10 +189,7 @@ pub fn meeting_stop_capture(app: AppHandle) -> Result<MeetingTranscript, String>
     let transcript = MeetingTranscript {
         id: Uuid::new_v4().to_string(),
         app_name: inner.app_name.clone().unwrap_or_else(|| "Unknown".into()),
-        started_at: inner
-            .started_at_wall
-            .clone()
-            .unwrap_or_else(now_epoch_secs),
+        started_at: inner.started_at_wall.clone().unwrap_or_else(now_epoch_secs),
         ended_at: now_epoch_secs(),
         segments: std::mem::take(&mut inner.segments),
     };
@@ -235,7 +232,11 @@ pub async fn meeting_submit_mic_chunk(app: AppHandle, audio_base64: String) -> R
 /// Shared by the mic Tauri command and (once wired up) the system-audio chunker. Silently drops
 /// chunks that arrive after the session has already ended instead of erroring — that's a normal
 /// race between the frontend's chunk timer and a manual Stop, not a failure.
-pub async fn ingest_chunk(app: &AppHandle, speaker: &str, audio_bytes: Vec<u8>) -> Result<(), String> {
+pub async fn ingest_chunk(
+    app: &AppHandle,
+    speaker: &str,
+    audio_bytes: Vec<u8>,
+) -> Result<(), String> {
     let session_id = {
         let state = app.state::<MeetingSession>();
         let inner = state
@@ -253,7 +254,7 @@ pub async fn ingest_chunk(app: &AppHandle, speaker: &str, audio_bytes: Vec<u8>) 
         let b64 = STANDARD.encode(&audio_bytes);
         cloud_api::meeting_transcribe(&config, &b64, speaker, &session_id).await
     } else {
-        crate::stt_gcp::transcribe(&config, audio_bytes).await
+        crate::stt_local::transcribe(&config, audio_bytes).await
     };
 
     let text = match text_result {
@@ -378,4 +379,135 @@ pub fn open_screen_recording_settings() -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Could not open Screen Recording settings: {e}"))?;
     Ok(())
+}
+
+pub fn latest_question_context(app: &AppHandle) -> Result<MeetingQuestionContext, String> {
+    let state = app.state::<MeetingSession>();
+    let inner = state
+        .inner
+        .lock()
+        .map_err(|_| "Meeting session lock poisoned".to_string())?;
+
+    if inner.phase != MeetingPhase::Capturing {
+        return Err(
+            "No live conversation is being captured. Start meeting transcription first.".into(),
+        );
+    }
+    if inner.segments.is_empty() {
+        return Err("No live conversation text has been captured yet.".into());
+    }
+
+    let question = pick_latest_question(&inner.segments)
+        .ok_or_else(|| "No question has been detected in the live conversation yet.".to_string())?;
+    let transcript = inner
+        .segments
+        .iter()
+        .rev()
+        .take(30)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|segment| format!("{}: {}", segment.speaker, segment.text.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(MeetingQuestionContext {
+        question,
+        transcript,
+    })
+}
+
+fn pick_latest_question(segments: &[TranscriptSegment]) -> Option<String> {
+    let mut newest_any = None;
+    let mut newest_other = None;
+    for segment in segments.iter().rev() {
+        if let Some(question) = extract_question(&segment.text) {
+            if newest_any.is_none() {
+                newest_any = Some(question.clone());
+            }
+            if segment.speaker != "you" {
+                newest_other = Some(question);
+                break;
+            }
+        }
+    }
+    newest_other.or(newest_any)
+}
+
+fn extract_question(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    if let Some(idx) = text.rfind('?') {
+        let before = &text[..=idx];
+        let start = before
+            .rfind(|c| matches!(c, '.' | '!' | '\n'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let question = before[start..].trim();
+        if !question.is_empty() {
+            return Some(question.to_string());
+        }
+    }
+
+    let lower = text.to_lowercase();
+    let looks_like_question = [
+        "can you ",
+        "could you ",
+        "do you ",
+        "does ",
+        "how ",
+        "should ",
+        "what ",
+        "when ",
+        "where ",
+        "which ",
+        "who ",
+        "why ",
+        "would you ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix));
+
+    looks_like_question.then(|| text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(speaker: &str, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            speaker: speaker.into(),
+            text: text.into(),
+            at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn prefers_newest_other_question() {
+        let segments = vec![
+            seg("other", "What is the deadline?"),
+            seg("you", "Can you send the doc?"),
+            seg("other", "Should we ship Friday?"),
+        ];
+        assert_eq!(
+            pick_latest_question(&segments).as_deref(),
+            Some("Should we ship Friday?")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_newest_user_question() {
+        let segments = vec![
+            seg("you", "What is the status?"),
+            seg("you", "Can you confirm the time?"),
+        ];
+        assert_eq!(
+            pick_latest_question(&segments).as_deref(),
+            Some("Can you confirm the time?")
+        );
+    }
 }

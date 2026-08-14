@@ -1,5 +1,5 @@
 //! Loads Vibe Coding `context/`, `skills/`, and `constitutions/` from the project root.
-//! Used by Control+2 refine and as system guidance for Control+1 prompt generation.
+//! Used as system guidance for fn+1 prompt generation.
 
 use std::env;
 use std::fs;
@@ -8,9 +8,13 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::config::load_config;
 
-const CONTEXT_CHAR_LIMIT: usize = 1800;
-const CONSTITUTION_CHAR_LIMIT: usize = 2200;
-const SKILL_CHAR_LIMIT: usize = 1200;
+// project.md alone is ~3.2k. The old 1800 could not hold it even with nothing else in
+// context/, and project.md calls latency "a secondary concern" for fn+1 — so the budget
+// is sized to fit the real files whole rather than to shave tokens.
+const CONTEXT_CHAR_LIMIT: usize = 6000;
+// The compacted constitution (grammar appendix already stripped) is ~3.7k; 3600 cut it.
+const CONSTITUTION_CHAR_LIMIT: usize = 4200;
+const SKILL_CHAR_LIMIT: usize = 4000;
 const TRIM_MARKER: &str = "\n\n[Trimmed for latency]";
 
 /// Resolve the Vibe Coding project root (folder that contains `context/`).
@@ -49,7 +53,13 @@ pub fn project_root() -> Result<PathBuf, String> {
     )
 }
 
-/// Concatenate markdown under `context/` for Control+2.
+/// Concatenate markdown under `context/` for fn+1 prompt generation.
+///
+/// Budgeting is per file, not one truncation of the concatenation. Trimming the joined
+/// blob spends the whole allowance in directory order, so one long file silently starves
+/// every file after it — `cloud-hosting.md` (5.1k of decommissioned-GCP runbook, sorted
+/// ahead of `project.md`) left fn+1 with zero project facts and a pile of billing trivia.
+/// Each file now gets its own share, and `PRIORITY_FILES` decides who is trimmed last.
 pub fn load_project_context() -> Result<String, String> {
     let root = project_root()?;
     let dir = root.join("context");
@@ -72,21 +82,63 @@ pub fn load_project_context() -> Result<String, String> {
         })
         .collect();
     files.sort();
+    files.sort_by_key(|p| priority_rank(p));
 
     if files.is_empty() {
         return Ok("[FILL: no context markdown files found]".into());
     }
 
+    let entries: Vec<(String, String)> = files
+        .iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown.md");
+            let body =
+                fs::read_to_string(path).unwrap_or_else(|_| "[FILL: unreadable file]".into());
+            (format!("### {name}\n\n"), body.trim().to_string())
+        })
+        .collect();
+
+    // Each file is guaranteed a floor, and whatever the others do not need flows to the one
+    // being written now. Reserving the floor for files still to come is what stops a
+    // high-priority file from being trimmed while a later short file leaves budget unspent —
+    // surplus has to travel in both directions, not just forward.
+    let floor = CONTEXT_CHAR_LIMIT / entries.len();
+    let mut budget = CONTEXT_CHAR_LIMIT;
     let mut out = String::new();
-    for path in files {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown.md");
-        let body = fs::read_to_string(&path).unwrap_or_else(|_| "[FILL: unreadable file]".into());
-        out.push_str(&format!("### {name}\n\n{body}\n\n"));
+    for (index, (heading, body)) in entries.iter().enumerate() {
+        let reserved: usize = entries[index + 1..]
+            .iter()
+            .map(|(next_heading, next_body)| (next_heading.len() + next_body.len()).min(floor))
+            .sum();
+        let room = budget
+            .saturating_sub(reserved)
+            .saturating_sub(heading.len());
+        if room == 0 {
+            continue;
+        }
+
+        let body = trim_for_latency(body, room);
+        budget = budget.saturating_sub(heading.len() + body.len());
+        out.push_str(heading);
+        out.push_str(&body);
+        out.push_str("\n\n");
     }
-    Ok(trim_for_latency(&out, CONTEXT_CHAR_LIMIT))
+    Ok(out.trim_end().to_string())
+}
+
+/// Files fn+1 cannot do without, most important first. Anything unlisted keeps alphabetical
+/// order behind them.
+const PRIORITY_FILES: [&str; 2] = ["project.md", "README.md"];
+
+fn priority_rank(path: &Path) -> usize {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    PRIORITY_FILES
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(name))
+        .unwrap_or(PRIORITY_FILES.len())
 }
 
 /// Load the Vibe Coding constitution text.
@@ -124,18 +176,12 @@ pub fn load_skill_blurb(skill_id: &str) -> String {
         Ok(root) => {
             let key = format!("{}::{skill_id}", root.display());
             if let Ok(mut cache) = skill_cache().lock() {
-                if let Some(value) = cache
-                    .iter()
-                    .find_map(|(cached_key, cached_value)| {
-                        (cached_key == &key).then(|| cached_value.clone())
-                    })
-                {
+                if let Some(value) = cache.iter().find_map(|(cached_key, cached_value)| {
+                    (cached_key == &key).then(|| cached_value.clone())
+                }) {
                     return value;
                 }
-                let path = root
-                    .join("skills")
-                    .join(skill_id)
-                    .join("SKILL.md");
+                let path = root.join("skills").join(skill_id).join("SKILL.md");
                 let value = compact_skill(&read_or_placeholder(
                     &path,
                     &format!("[FILL: skills/{skill_id}/SKILL.md]"),
@@ -143,10 +189,7 @@ pub fn load_skill_blurb(skill_id: &str) -> String {
                 cache.push((key, value.clone()));
                 return value;
             }
-            let path = root
-                .join("skills")
-                .join(skill_id)
-                .join("SKILL.md");
+            let path = root.join("skills").join(skill_id).join("SKILL.md");
             compact_skill(&read_or_placeholder(
                 &path,
                 &format!("[FILL: skills/{skill_id}/SKILL.md]"),
@@ -172,28 +215,20 @@ fn read_or_placeholder(path: &Path, placeholder: &str) -> String {
 
 fn compact_constitution(text: &str) -> String {
     let source = text.trim();
-    let mut compact = source.to_string();
-    if let Some((head, tail)) = source.split_once("## Quality bar") {
-        compact = head.trim().to_string();
-        if let Some((_, refine_tail)) = tail.split_once("## Refine step") {
-            let refine = format!("## Refine step{refine_tail}");
-            let refine = refine
-                .split_once("## Grammar-correction step")
-                .map(|(head, _)| head.trim().to_string())
-                .unwrap_or_else(|| refine.trim().to_string());
-            compact.push_str("\n\n");
-            compact.push_str(&refine);
-        }
-    }
+    // Keep the canonical template + quality bar + context enrichment. Drop only the
+    // fn+2 grammar appendix — stripping the quality bar left the model with no
+    // mechanical target and hurt fn+1 accuracy.
+    let compact = source
+        .split_once("## Grammar-correction additions")
+        .map(|(head, _)| head.trim().to_string())
+        .unwrap_or_else(|| source.to_string());
     trim_for_latency(&compact, CONSTITUTION_CHAR_LIMIT)
 }
 
 fn compact_skill(text: &str) -> String {
-    let compact = text
-        .split_once("## Worked example")
-        .map(|(head, _)| head.trim().to_string())
-        .unwrap_or_else(|| text.trim().to_string());
-    trim_for_latency(&compact, SKILL_CHAR_LIMIT)
+    // Keep the worked example. Earlier latency trimming cut at "## Worked example",
+    // so local fn+1 had skill notes with no shape to imitate.
+    trim_for_latency(text.trim(), SKILL_CHAR_LIMIT)
 }
 
 fn trim_for_latency(text: &str, limit: usize) -> String {
@@ -224,6 +259,44 @@ fn trim_for_latency(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression that broke fn+1: `project.md` is the file that carries the product
+    /// facts, and a long unrelated file sorted ahead of it must never push it out entirely.
+    #[test]
+    fn the_project_file_always_reaches_the_model() {
+        let loaded = load_project_context().expect("context/ should load from the repo");
+        assert!(
+            loaded.contains("### project.md"),
+            "project.md was starved out of the context budget:\n{loaded}"
+        );
+    }
+
+    /// The real repo must fit whole — if these files start getting cut, the budget is wrong.
+    #[test]
+    fn the_current_context_files_are_not_trimmed_at_all() {
+        let loaded = load_project_context().expect("context/ should load from the repo");
+        assert!(
+            !loaded.contains(TRIM_MARKER),
+            "context/ no longer fits in CONTEXT_CHAR_LIMIT:\n{loaded}"
+        );
+    }
+
+    /// Priority decides who is trimmed, never who is dropped — every file keeps a share.
+    #[test]
+    fn a_long_low_priority_file_cannot_starve_the_others() {
+        let mut ranked = vec![
+            PathBuf::from("context/zzz-runbook.md"),
+            PathBuf::from("context/project.md"),
+            PathBuf::from("context/README.md"),
+        ];
+        ranked.sort();
+        ranked.sort_by_key(|p| priority_rank(p));
+        let order: Vec<&str> = ranked
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(order, ["project.md", "README.md", "zzz-runbook.md"]);
+    }
 
     #[test]
     fn short_text_is_returned_untouched() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Double-check / double-test Flow Vibe Coding pipeline (no secrets printed).
 set -euo pipefail
-ROOT="/Users/efi/Projects/Wispr Flow"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0
 FAIL=0
 round() { echo ""; echo "======== $1 ========"; }
@@ -16,7 +16,6 @@ for f in \
   skills/speech-to-text/SKILL.md \
   skills/grammar-correct/SKILL.md \
   skills/vibe-prompt/SKILL.md \
-  skills/refine-prompt/SKILL.md \
   src-tauri/src/stt_gcp.rs \
   src-tauri/src/dictate.rs \
   src-tauri/src/vibe_context.rs \
@@ -42,7 +41,6 @@ checks=[
   (cfg.get("stt_provider")=="gcp_speech", "stt_provider"),
   (cfg.get("llm_provider")=="deepseek", "llm_provider"),
   (cfg.get("hotkey")=="Control+1", "hotkey Control+1"),
-  (cfg.get("prompt_hotkey")=="Control+2", "prompt_hotkey Control+2"),
   (bool(cfg.get("llm_api_key")), "llm_api_key present"),
   (pathlib.Path(cfg.get("vibe_project_root") or "").joinpath("context").is_dir(), "vibe_project_root/context"),
 ]
@@ -99,7 +97,7 @@ PY
   fi
 done
 
-round "5) DeepSeek grammar + vibe prompt + refine (twice each)"
+round "5) DeepSeek grammar + vibe prompt with context (twice each)"
 KEY=$(grep '^DEEPSEEK_API_KEY=' "$ENVF" | head -1 | cut -d= -f2-)
 CONTEXT=$(cat "$ROOT/context/project.md" "$ROOT/constitutions/vibe-coding.md")
 for i in 1 2; do
@@ -107,6 +105,7 @@ for i in 1 2; do
 import json, urllib.request, pathlib
 key=open("$ENVF").read().split("DEEPSEEK_API_KEY=",1)[1].splitlines()[0].strip()
 root=pathlib.Path("$ROOT")
+ctx=(root/"context/project.md").read_text()+"\n"+(root/"constitutions/vibe-coding.md").read_text()
 
 def chat(messages, out_path):
     body=json.dumps({
@@ -135,24 +134,17 @@ print(f"GRAMMAR_OK::{g}")
 
 v=chat([
     {"role":"system","content":"Generate a perfect Vibe Coding prompt. Return ONLY the prompt. Preserve proper nouns. Use [FILL: ...] when unknown."},
-    {"role":"user","content":f"Create a perfect Vibe Coding prompt from this corrected speech:\n\n{g}"},
+    {"role":"user","content":f"Current text:\n\n{g}\n\n---\nProject context:\n\n{ctx}"},
 ], f"/tmp/ds_vibe_$i.json")
 pathlib.Path(f"/tmp/ds_vibe_prompt_$i.txt").write_text(v)
 print(f"VIBE_OK::{len(v)}")
-
-ctx=(root/"context/project.md").read_text()+"\n"+(root/"constitutions/vibe-coding.md").read_text()
-r=chat([
-    {"role":"system","content":"Refine the Vibe Coding prompt using project context. Return ONLY the refined prompt."},
-    {"role":"user","content":f"Selected generated prompt:\n\n{v}\n\n---\nProject context:\n\n{ctx}\n\n---\nProduce the refined Vibe Coding prompt."},
-], f"/tmp/ds_refine_$i.json")
-print(f"REFINE_OK::{len(r)}")
 # Placeholder checklist for the user's Test template: FILL markers may remain by design.
 print("PLACEHOLDERS_NOTE::FILL markers in prompts are intentional when details are unknown")
 PY
   # Parse python status lines
   # shellcheck disable=SC2181
   if [[ $? -eq 0 ]]; then
-    ok "DeepSeek grammar+vibe+refine pipeline round $i"
+    ok "DeepSeek grammar+vibe pipeline round $i"
   else
     bad "DeepSeek pipeline round $i"
   fi
@@ -160,16 +152,20 @@ done
 
 round "6) Hotkey registration in source (twice-read)"
 for i in 1 2; do
-  if rg -q 'Modifiers::CONTROL.*, Code::Digit1' "$ROOT/src-tauri/src/lib.rs" \
-    && rg -q 'Modifiers::CONTROL.*, Code::Digit2' "$ROOT/src-tauri/src/lib.rs"; then
-    ok "Control+1/+2 registered in lib.rs read $i"
+  if rg -q 'fn start failed' "$ROOT/src-tauri/src/macos_fn.rs" \
+    && rg -q 'start_prompt' "$ROOT/src-tauri/src/macos_fn.rs" \
+    && rg -q 'start_correct_text' "$ROOT/src-tauri/src/macos_fn.rs" \
+    && rg -q 'start_meeting_answer' "$ROOT/src-tauri/src/macos_fn.rs"; then
+    ok "fn/fn+1/fn+2/fn+3 handlers present read $i"
   else
-    bad "hotkeys missing read $i"
+    bad "fn chord handlers missing read $i"
   fi
-  if rg -q '"vibe"' "$ROOT/src-tauri/src/dictate.rs" && rg -q '"vibe_refine"' "$ROOT/src-tauri/src/dictate.rs"; then
-    ok "vibe modes in dictate.rs read $i"
+  if rg -q '"vibe_text"' "$ROOT/src-tauri/src/dictate.rs" \
+    && rg -q '"correct_text"' "$ROOT/src-tauri/src/dictate.rs" \
+    && rg -q '"meeting_answer"' "$ROOT/src-tauri/src/dictate.rs"; then
+    ok "current modes in dictate.rs read $i"
   else
-    bad "vibe modes missing read $i"
+    bad "current modes missing read $i"
   fi
 done
 

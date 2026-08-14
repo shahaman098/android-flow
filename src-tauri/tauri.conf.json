@@ -30,8 +30,8 @@
       {
         "label": "bubble",
         "title": "Flow Dock",
-        "width": 60,
-        "height": 120,
+        "width": 50,
+        "height": 100,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": false,

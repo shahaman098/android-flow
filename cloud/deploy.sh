@@ -1,21 +1,109 @@
 #!/usr/bin/env bash
-# Deploy Flow processing API to MyGCP (n8n App / project-ced3b331-e814-4d72-8bc).
+# Deploy Flow processing API to the cheapest cloud shape:
+# Cloud Run scale-to-zero + external pay-per-use STT/LLM APIs. No LLM VM.
 set -euo pipefail
 
-ACCOUNT="sahkris0844@gmail.com"
-PROJECT="project-ced3b331-e814-4d72-8bc"
-REGION="europe-west2"
-ZONE="europe-west2-a"
-SERVICE="flow-api"
-SA_NAME="flow-runtime"
+ACCOUNT="${GCP_ACCOUNT:-sahkris0844@gmail.com}"
+PROJECT="${GCP_PROJECT:-project-ced3b331-e814-4d72-8bc}"
+REGION="${GCP_REGION:-europe-west2}"
+SERVICE="${FLOW_SERVICE:-flow-api}"
+SA_NAME="${FLOW_SA_NAME:-flow-runtime}"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
-LLM_VM="flow-llm"
-NETWORK="default"
-SUBNET="default"
-RUN_NETWORK_TAG="flow-run"
-LLM_NETWORK_TAG="flow-llm"
-LLM_FIREWALL_RULE="allow-flow-llm-8080"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+APP_ENV="${HOME}/Library/Application Support/voice-flow/.env"
+
+STT_PROVIDER="${STT_PROVIDER:-groq_whisper}"
+GROQ_STT_MODEL="${GROQ_STT_MODEL:-whisper-large-v3-turbo}"
+LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
+
+case "$LLM_PROVIDER" in
+  deepseek|"")
+    LLM_PROVIDER="deepseek"
+    LLM_BASE_URL="${LLM_BASE_URL:-${DEEPSEEK_BASE_URL:-https://api.deepseek.com}}"
+    LLM_MODEL="${LLM_MODEL:-${DEEPSEEK_MODEL:-deepseek-v4-flash}}"
+    LLM_KEY_ENV="DEEPSEEK_API_KEY"
+    LLM_SECRET="deepseek-api-key"
+    ;;
+  xai)
+    LLM_BASE_URL="${LLM_BASE_URL:-${XAI_BASE_URL:-https://api.x.ai/v1}}"
+    LLM_MODEL="${LLM_MODEL:-${XAI_MODEL:-grok-4.3}}"
+    LLM_KEY_ENV="XAI_API_KEY"
+    LLM_SECRET="xai-api-key"
+    ;;
+  openai_compatible)
+    LLM_BASE_URL="${LLM_BASE_URL:?LLM_BASE_URL is required for LLM_PROVIDER=openai_compatible}"
+    LLM_MODEL="${LLM_MODEL:?LLM_MODEL is required for LLM_PROVIDER=openai_compatible}"
+    LLM_KEY_ENV="LLM_API_KEY"
+    LLM_SECRET="llm-api-key"
+    ;;
+  *)
+    echo "error: unsupported LLM_PROVIDER=${LLM_PROVIDER}. Use deepseek, xai, or openai_compatible." >&2
+    exit 1
+    ;;
+esac
+
+read_local_env() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -n "$value" || ! -f "$APP_ENV" ]]; then
+    printf '%s' "$value"
+    return
+  fi
+  python3 - "$APP_ENV" "$name" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+name = sys.argv[2]
+for raw in path.read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() == name:
+        print(value.strip().strip('"').strip("'"), end="")
+        break
+PY
+}
+
+ensure_secret() {
+  local secret="$1"
+  local env_name="$2"
+  local required="$3"
+
+  if gcloud secrets describe "$secret" --project="$PROJECT" >/dev/null 2>&1; then
+    echo "Using existing secret ${secret}"
+    return
+  fi
+
+  local value
+  value="$(read_local_env "$env_name")"
+  if [[ -z "$value" ]]; then
+    if [[ "$required" == "required" ]]; then
+      echo "error: ${env_name} is required to create Secret Manager secret ${secret}." >&2
+      echo "Add it to ${APP_ENV} or export ${env_name}, then re-run this script." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  printf '%s' "$value" | gcloud secrets create "$secret" \
+    --project="$PROJECT" \
+    --replication-policy=automatic \
+    --data-file=-
+  echo "Created secret ${secret}"
+}
+
+grant_secret_access() {
+  local secret="$1"
+  if gcloud secrets describe "$secret" --project="$PROJECT" >/dev/null 2>&1; then
+    gcloud secrets add-iam-policy-binding "$secret" \
+      --project="$PROJECT" \
+      --member="serviceAccount:${SA_EMAIL}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None >/dev/null
+  fi
+}
 
 gcloud config set account "$ACCOUNT"
 gcloud config set project "$PROJECT"
@@ -25,10 +113,12 @@ gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
-  compute.googleapis.com \
-  speech.googleapis.com \
   secretmanager.googleapis.com \
   --project="$PROJECT"
+
+if [[ "$STT_PROVIDER" == "gcp_speech" ]]; then
+  gcloud services enable speech.googleapis.com --project="$PROJECT"
+fi
 
 echo "==> Service account"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1; then
@@ -37,51 +127,40 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev
     --project="$PROJECT"
 fi
 
-gcloud projects add-iam-policy-binding "$PROJECT" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/speech.client" \
-  --condition=None >/dev/null
+if [[ "$STT_PROVIDER" == "gcp_speech" ]]; then
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/speech.client" \
+    --condition=None >/dev/null
+fi
+
 echo "==> Secrets"
 if ! gcloud secrets describe flow-api-key --project="$PROJECT" >/dev/null 2>&1; then
-  KEY=$(openssl rand -hex 32)
-  printf '%s' "$KEY" | gcloud secrets create flow-api-key \
+  FLOW_KEY="$(openssl rand -hex 32)"
+  printf '%s' "$FLOW_KEY" | gcloud secrets create flow-api-key \
     --project="$PROJECT" \
     --replication-policy=automatic \
     --data-file=-
   echo "Created secret flow-api-key"
 else
-  KEY=$(gcloud secrets versions access latest --secret=flow-api-key --project="$PROJECT")
+  FLOW_KEY="$(gcloud secrets versions access latest --secret=flow-api-key --project="$PROJECT")"
   echo "Using existing secret flow-api-key"
 fi
 
-# Allow runtime SA to read secrets
-for SECRET in flow-api-key hermes-api-server-key; do
-  gcloud secrets add-iam-policy-binding "$SECRET" \
-    --project="$PROJECT" \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/secretmanager.secretAccessor" \
-    --condition=None >/dev/null 2>&1 || true
-done
-
-# Secret access is granted on the two Flow secrets above; remove the older
-# project-wide grant if a previous deployment created it.
-gcloud projects remove-iam-policy-binding "$PROJECT" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor" \
-  --condition=None >/dev/null 2>&1 || true
-
-LLM_PRIVATE_IP=$(gcloud compute instances describe "$LLM_VM" \
-  --zone="$ZONE" \
-  --project="$PROJECT" \
-  --format='get(networkInterfaces[0].networkIP)')
-if [[ -z "$LLM_PRIVATE_IP" ]]; then
-  echo "error: could not resolve private IP for ${LLM_VM}" >&2
-  exit 1
+ensure_secret "$LLM_SECRET" "$LLM_KEY_ENV" required
+if [[ "$STT_PROVIDER" == "groq" || "$STT_PROVIDER" == "groq_whisper" || -z "$STT_PROVIDER" ]]; then
+  ensure_secret groq-api-key GROQ_API_KEY required
 fi
 
-# min=1: scale-to-zero put a ~4s cold start in front of the first
-# dictation after any idle gap, which is the one the user notices most. One warm
-# instance at 1 vCPU / 1Gi is a rounding error next to the always-on flow-llm VM.
+grant_secret_access flow-api-key
+grant_secret_access "$LLM_SECRET"
+grant_secret_access groq-api-key
+
+SECRET_ARGS="FLOW_API_KEY=flow-api-key:latest,LLM_API_KEY=${LLM_SECRET}:latest"
+if gcloud secrets describe groq-api-key --project="$PROJECT" >/dev/null 2>&1; then
+  SECRET_ARGS="${SECRET_ARGS},GROQ_API_KEY=groq-api-key:latest"
+fi
+
 echo "==> Deploy Cloud Run service ${SERVICE}"
 gcloud run deploy "$SERVICE" \
   --source="$ROOT" \
@@ -90,32 +169,29 @@ gcloud run deploy "$SERVICE" \
   --service-account="$SA_EMAIL" \
   --allow-unauthenticated \
   --quiet \
-  --memory=1Gi \
+  --memory=512Mi \
   --cpu=1 \
-  --timeout=1100 \
-  --max=3 \
-  --min=1 \
-  --network="$NETWORK" \
-  --subnet="$SUBNET" \
-  --network-tags="$RUN_NETWORK_TAG" \
-  --vpc-egress=private-ranges-only \
-  --set-env-vars="GCP_PROJECT_ID=${PROJECT},GCP_LOCATION=${REGION},STT_MODEL=latest_long,DEFAULT_LANGUAGE=en-GB,HERMES_BASE_URL=http://${LLM_PRIVATE_IP}:8080,HERMES_MODEL=qwen2.5:3b" \
-  --set-secrets="FLOW_API_KEY=flow-api-key:latest,HERMES_API_KEY=hermes-api-server-key:latest"
+  --timeout=300 \
+  --concurrency=4 \
+  --max=2 \
+  --min=0 \
+  --set-env-vars="STT_PROVIDER=${STT_PROVIDER},GROQ_STT_MODEL=${GROQ_STT_MODEL},GCP_PROJECT_ID=${PROJECT},GCP_LOCATION=${REGION},STT_MODEL=latest_long,DEFAULT_LANGUAGE=en-GB,LLM_PROVIDER=${LLM_PROVIDER},LLM_BASE_URL=${LLM_BASE_URL},LLM_MODEL=${LLM_MODEL}" \
+  --set-secrets="$SECRET_ARGS"
 
-URL=$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" --format='value(status.url)')
+URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" --format='value(status.url)')"
 echo ""
 echo "DEPLOYED: $URL"
 echo "FLOW_API_URL=$URL"
 echo "FLOW_API_KEY=<from Secret Manager flow-api-key>"
 
-# Write local Mac env (gitignored Application Support path)
-APP_SUPPORT="${HOME}/Library/Application Support/voice-flow"
-mkdir -p "$APP_SUPPORT"
+echo "==> Write Mac app cloud config"
+mkdir -p "$(dirname "$APP_ENV")"
 export FLOW_DEPLOY_URL="$URL"
-export FLOW_DEPLOY_KEY="$KEY"
+export FLOW_DEPLOY_KEY="$FLOW_KEY"
 python3 <<'PY'
 import os
 from pathlib import Path
+
 env_path = Path.home() / "Library/Application Support/voice-flow/.env"
 url = os.environ["FLOW_DEPLOY_URL"]
 key = os.environ["FLOW_DEPLOY_KEY"]
@@ -136,30 +212,7 @@ env_path.parent.chmod(0o700)
 print(f"Wrote {env_path} (FLOW_API_URL + FLOW_API_KEY + PROCESSING_MODE=cloud)")
 PY
 
-echo "==> Health check over private VPC path"
-curl --fail --silent --show-error --max-time 30 "${URL}/health"
-echo ""
-
-echo "==> Restrict LLM proxy to Cloud Run's VPC network tag"
-if gcloud compute firewall-rules describe "$LLM_FIREWALL_RULE" --project="$PROJECT" >/dev/null 2>&1; then
-  gcloud compute firewall-rules update "$LLM_FIREWALL_RULE" \
-    --project="$PROJECT" \
-    --allow=tcp:8080 \
-    --source-ranges= \
-    --source-tags="$RUN_NETWORK_TAG" \
-    --target-tags="$LLM_NETWORK_TAG" \
-    --quiet
-else
-  gcloud compute firewall-rules create "$LLM_FIREWALL_RULE" \
-    --project="$PROJECT" \
-    --allow=tcp:8080 \
-    --source-tags="$RUN_NETWORK_TAG" \
-    --target-tags="$LLM_NETWORK_TAG" \
-    --description="Flow Cloud Run to private LLM proxy" \
-    --quiet
-fi
-
-echo "==> Post-firewall health check"
-curl --fail --silent --show-error --max-time 30 "${URL}/health"
+echo "==> Health check"
+curl --fail --silent --show-error --max-time 30 -H "Authorization: Bearer ${FLOW_KEY}" "${URL}/health"
 echo ""
 echo "DONE"

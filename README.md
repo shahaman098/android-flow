@@ -4,14 +4,16 @@ Personal Mac helper for **speech → grammar → Vibe Coding prompts**.
 
 | Shortcut | Pipeline |
 |---|---|
-| **hold `fn`** | Speech → GCP STT → grammar cleanup → paste |
-| **hold `fn` + `1`** | Speech → GCP STT → grammar cleanup → **perfect Vibe Coding prompt** → paste |
-| **`fn` + `2`** | Select-all current prompt → load `context/` → **refined Vibe Coding prompt** → paste |
+| **hold `fn`** | Speech → STT → light cleanup → snippet expand → paste |
+| **`fn` + `1`** | Select-all current text → load `context/` → **perfect Vibe Coding prompt** → paste |
+| **`fn` + `2`** | Select-all current text → grammar/spelling cleanup → paste |
+| **`fn` + `3`** | Answer the latest question detected in the live conversation transcript → paste |
 
-`fn` (the Globe key) is the primary hotkey and is always hold-to-talk. **Control+1** and
-**Control+2** remain registered as fallbacks for the prompt and refine pipelines — useful
-when the `fn` event tap cannot start. Control+1 honours the *Hands-free* setting (tap to
-start, tap to stop); `fn` does not.
+`fn` (the Globe key) is the primary control. Hold `fn` to dictate with light
+cleanup (disable in Settings for raw STT). If text is already selected, a short
+spoken command edits that range. `fn+1` turns the current text into a Vibe
+Coding prompt, `fn+2` corrects the current field, and `fn+3` answers the latest
+detected live-conversation question.
 
 Do not change the intended meaning of these shortcuts.
 
@@ -23,35 +25,97 @@ Wispr Flow/
 │   └── vibe-coding.md          # Rules for prompt generation
 ├── context/
 │   ├── README.md
-│   └── project.md              # Project facts for Control+2
+│   └── project.md              # Project facts for fn+1 prompt generation
 ├── skills/
 │   ├── README.md
 │   ├── speech-to-text/SKILL.md
 │   ├── grammar-correct/SKILL.md
-│   ├── vibe-prompt/SKILL.md    # Control+1
-│   └── refine-prompt/SKILL.md  # Control+2
+│   └── vibe-prompt/SKILL.md    # fn+1
 ├── src/                        # React Hub + bubble UI
 └── src-tauri/src/
-    ├── stt_gcp.rs              # Speech-to-text (GCP)
-    ├── dictate.rs              # Grammar + vibe / refine prompts
+    ├── stt_groq.rs             # Speech-to-text (Groq)
+    ├── stt_gcp.rs              # Speech-to-text fallback (GCP)
+    ├── dictate.rs              # Light-cleaned dictation + prompt/correction/answer transforms
     ├── vibe_context.rs         # Loads context/, skills/, constitutions/
     └── focus.rs                # Select-all / paste into target app
 ```
 
 `[FILL: add more context/*.md as the project grows]`
 
-## Providers (MyGCP)
+## Providers
 
 | Stage | Where |
 |---|---|
-| Mic + paste | Mac Flow.app |
-| Speech-to-text | Cloud Run `flow-api` → Speech V2 (`europe-west2`) |
-| Grammar / Vibe prompts | Cloud Run `flow-api` → **Qwen2.5-3B** (Ollama on `flow-llm` VM) |
+| Mic + paste | Always local in Mac Flow.app |
+| Local | Mac STT (whisper.cpp or Groq) + Mac LLM (DeepSeek / xAI) |
+| Hybrid | Mac STT + Cloud Run LLM (`flow-api` `/v1/process` with transcript, no audio) |
+| Cloud | Mac records/pastes only → Cloud Run STT + LLM |
 
-`cloud/deploy.sh` writes the live API URL and key into
+Fresh installs default to local unless `FLOW_API_URL` and `FLOW_API_KEY` are already
+configured. Cloud deploys set `PROCESSING_MODE=cloud` automatically. Switch to hybrid
+in **Hub → Settings** to keep speech on the Mac while using Cloud Run for cleanup and
+prompts.
+
+### Local mode
+
+```bash
+export DEEPSEEK_API_KEY=...
+bash scripts/configure-local.sh
+pnpm start
+```
+
+The Mac records, transcribes, and pastes locally, then calls DeepSeek for cleanup/prompting. No
+Cloud Run, GCP billing, or STT API key is required for this mode.
+
+Prerequisites:
+
+```bash
+brew install whisper-cpp ffmpeg
+mkdir -p "$HOME/Library/Application Support/voice-flow/models"
+curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
+  -o "$HOME/Library/Application Support/voice-flow/models/ggml-small.en.bin"
+```
+
+Optional low-CPU Groq STT instead of local Whisper:
+
+```bash
+export STT_PROVIDER=groq_whisper
+export GROQ_API_KEY=...
+bash scripts/configure-local.sh
+```
+
+Optional xAI/Grok LLM instead of DeepSeek:
+
+```bash
+export LLM_PROVIDER=xai
+export XAI_API_KEY=...
+bash scripts/configure-local.sh
+```
+
+### Hybrid mode
+
+Set `PROCESSING_MODE=hybrid` (or pick **Hybrid** in Hub Settings) when Cloud Run is
+deployed and you still want Mac speech. Dictation transcribes locally, then sends the
+transcript to Cloud Run for light cleanup, vibe prompts, grammar, and spoken edits.
+Meetings stay on local STT.
+
+```bash
+# After cloud/deploy.sh has written FLOW_API_*
+# Hub → Settings → Processing mode → Hybrid
+```
+
+### Cloud mode
+
+`cloud/deploy.sh` deploys the same processing pipeline behind Cloud Run, then writes the live API
+URL and key into
 `~/Library/Application Support/voice-flow/.env`, and Flow copies them into `config.json`
 on first run. Both are editable afterwards in **Hub → Settings**, which is authoritative —
 the `.env` values only fill in fields that are still blank.
+
+The default deployment scales Cloud Run to zero and does not create the old `flow-llm`
+Compute Engine VM. Add `GROQ_API_KEY` and `DEEPSEEK_API_KEY` to the app `.env` before
+deploying; use `STT_PROVIDER=gcp_speech bash cloud/deploy.sh` only if you deliberately
+want the more expensive GCP Speech fallback.
 
 ```bash
 gcloud config set account sahkris0844@gmail.com
@@ -59,7 +123,17 @@ gcloud config set project project-ced3b331-e814-4d72-8bc
 bash cloud/deploy.sh   # deploy / refresh Cloud Run + local FLOW_API_* keys
 ```
 
-Mac keeps only mic/paste; processing runs on MyGCP (`PROCESSING_MODE=cloud`).
+Mac keeps only mic/paste; STT and prompt processing run through Cloud Run
+(`PROCESSING_MODE=cloud`).
+
+Optional xAI/Grok Cloud Run deploy:
+
+```bash
+export GROQ_API_KEY=...
+export LLM_PROVIDER=xai
+export XAI_API_KEY=...
+bash cloud/deploy.sh
+```
 
 ## Run
 
@@ -109,8 +183,8 @@ followed by `CGEventTapCreate OK`.
 ## Checklist
 
 - [x] Speech-to-text (`stt_gcp.rs` + `skills/speech-to-text`)
-- [x] Grammar auto-correction (`polish_text` + `skills/grammar-correct`)
-- [x] Control+1 Vibe prompt (`vibe` mode + `skills/vibe-prompt`)
-- [x] Control+2 context refine (`vibe_refine` + `skills/refine-prompt`)
+- [x] fn+1 Vibe prompt from current text (`vibe_text` mode + `skills/vibe-prompt`)
+- [x] fn+2 text correction (`correct_text` mode + `skills/grammar-correct`)
+- [x] fn+3 live conversation question answering (`meeting_answer` mode)
 - [x] Folder structure `context/`, `skills/`, `constitutions/`
 - [x] Inline comments on each component

@@ -56,10 +56,10 @@ select {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  width: 46px;
-  height: 102px;
-  padding: 8px 0;
+  gap: 8px;
+  width: 38px;
+  height: 86px;
+  padding: 7px 0;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.54);
   background:
@@ -75,9 +75,8 @@ select {
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.62) inset,
     0 -1px 0 rgba(0, 0, 0, 0.04) inset,
-    0 8px 18px rgba(0, 0, 0, 0.14),
-    0 1px 4px rgba(0, 0, 0, 0.08),
-    0 0 10px rgba(100, 178, 255, 0.1);
+    0 0 0 1px rgba(255, 255, 255, 0.26),
+    0 0 10px rgba(100, 178, 255, 0.08);
   transition:
     width 160ms ease,
     height 160ms ease,
@@ -86,10 +85,10 @@ select {
 }
 
 .flow-bar.state-listening .flow-bar-shell {
-  width: 64px;
-  height: 286px;
-  gap: 14px;
-  padding: 14px 0;
+  width: 52px;
+  height: 216px;
+  gap: 10px;
+  padding: 10px 0;
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.72) inset,
     0 -1px 0 rgba(0, 0, 0, 0.05) inset,
@@ -100,27 +99,12 @@ select {
 .flow-bar.state-processing .flow-bar-shell {
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.72) inset,
-    0 8px 18px rgba(0, 0, 0, 0.14),
     0 0 14px rgba(240, 198, 116, 0.18);
-}
-
-.flow-bar.state-fallback .flow-bar-shell {
-  width: 104px;
-  height: 38px;
-  padding: 0 4px;
-  border-color: rgba(47, 128, 255, 0.36);
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.72), rgba(236, 245, 255, 0.54));
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.72) inset,
-    0 6px 14px rgba(0, 0, 0, 0.12),
-    0 0 12px rgba(47, 128, 255, 0.12);
 }
 
 .flow-bar.state-error .flow-bar-shell {
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.64) inset,
-    0 8px 18px rgba(0, 0, 0, 0.16),
     0 0 12px rgba(255, 80, 80, 0.22);
 }
 
@@ -137,8 +121,8 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 999px;
   border: 1px solid rgba(116, 187, 255, 0.58);
   background:
@@ -147,9 +131,8 @@ select {
   color: #2f80ff;
   flex-shrink: 0;
   box-shadow:
-    0 0 0 2px rgba(95, 177, 255, 0.1),
-    0 0 12px rgba(62, 154, 255, 0.22),
-    0 4px 9px rgba(52, 116, 204, 0.12),
+    0 0 0 1px rgba(95, 177, 255, 0.12),
+    0 0 10px rgba(62, 154, 255, 0.2),
     0 1px 0 rgba(255, 255, 255, 0.7) inset;
 }
 
@@ -160,15 +143,17 @@ select {
   border-radius: 999px;
   background: radial-gradient(
     circle,
-    rgba(47, 128, 255, 0.45) 0%,
-    rgba(47, 128, 255, 0.12) 55%,
+    rgba(47, 128, 255, 0.32) 0%,
+    rgba(47, 128, 255, 0.09) 55%,
     transparent 72%
   );
   pointer-events: none;
 }
 
 .flow-bar-mic.listening {
-  filter: drop-shadow(0 0 8px rgba(47, 128, 255, 0.48));
+  width: 28px;
+  height: 28px;
+  filter: drop-shadow(0 0 6px rgba(47, 128, 255, 0.4));
 }
 
 .flow-bar-mic.processing {
@@ -184,8 +169,8 @@ select {
 .flow-bar-mic-icon {
   position: relative;
   display: block;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
 }
 
 .flow-bar-error-bang {
@@ -201,49 +186,61 @@ select {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  width: 36px;
-  height: 98px;
+  gap: 4px;
+  width: 30px;
+  min-height: 0;
   flex: 1 1 auto;
-  filter: drop-shadow(0 0 9px rgba(47, 128, 255, 0.34));
 }
 
+/* The blue wash sits behind the bars and stays faint — a stronger spread here
+   washes the bars out completely against the frosted white pill. */
 .flow-bar-wave::before {
   content: "";
   position: absolute;
-  inset: -6px -10px;
+  z-index: 0;
+  inset: -6px -8px;
   border-radius: 999px;
   background: radial-gradient(
     ellipse at center,
-    rgba(47, 128, 255, 0.2) 0%,
-    rgba(47, 128, 255, 0.07) 55%,
+    rgba(47, 128, 255, 0.1) 0%,
+    rgba(47, 128, 255, 0.04) 55%,
     transparent 75%
   );
   pointer-events: none;
 }
 
+/* Bars are blue, not white: the pill behind them is light frosted glass, so a
+   white bar over the blue glow disappears. */
 .flow-bar-wave-bar {
   display: block;
   position: relative;
+  z-index: 1;
   height: 3px;
-  min-width: 10px;
+  min-width: 8px;
   max-width: 100%;
   align-self: center;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(228, 240, 255, 0.74) 0%, #ffffff 45%, rgba(228, 240, 255, 0.74) 100%);
-  box-shadow: 0 0 7px rgba(255, 255, 255, 0.95);
+  background: linear-gradient(
+    90deg,
+    rgba(47, 128, 255, 0.62) 0%,
+    #1e6fff 45%,
+    rgba(47, 128, 255, 0.62) 100%
+  );
+  box-shadow:
+    0 0 5px rgba(30, 111, 255, 0.5),
+    0 0 0 0.5px rgba(255, 255, 255, 0.5);
   transition: width 60ms linear;
 }
 
 .flow-bar-btn {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border-radius: 999px;
   border: 1px solid rgba(210, 216, 225, 0.9);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(238, 241, 246, 0.86));
   color: #6b7280;
-  font-size: 23px;
+  font-size: 19px;
   line-height: 1;
   padding: 0;
   cursor: pointer;
@@ -268,7 +265,7 @@ select {
 }
 
 .flow-bar-btn.cancel {
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 400;
   color: #7b8494;
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
@@ -287,9 +284,9 @@ select {
 
 .flow-bar-stop-sq {
   display: block;
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
   background: #ff4d57;
   box-shadow: 0 0 8px rgba(255, 77, 87, 0.34);
 }
@@ -379,9 +376,23 @@ aside {
 
 .hub-brand {
   display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 16px;
+}
+
+.hub-brand div {
+  display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 10px 16px;
+}
+
+.hub-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  flex-shrink: 0;
 }
 
 .hub-brand span {

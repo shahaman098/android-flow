@@ -1,4 +1,4 @@
-//! Mac client for Flow processing on MyGCP Cloud Run.
+//! Mac client for Flow processing on Cloud Run.
 //! All STT + LLM work happens in GCP; this module only uploads and receives text.
 
 use serde::{Deserialize, Serialize};
@@ -6,12 +6,22 @@ use serde_json::json;
 use std::time::Duration;
 
 use crate::config::AppConfig;
+use crate::training::ProcessTrace;
 
 #[derive(Debug, Deserialize)]
 struct TextResponse {
     text: String,
     #[serde(default)]
     raw_transcript: Option<String>,
+    #[serde(default)]
+    trace: Option<ProcessTrace>,
+}
+
+#[derive(Debug)]
+pub struct ProcessResult {
+    pub text: String,
+    pub raw_transcript: Option<String>,
+    pub trace: ProcessTrace,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,13 +41,12 @@ fn ensure_cloud(config: &AppConfig) -> Result<(String, String), String> {
     let key = config.flow_api_key.trim().to_string();
     if url.is_empty() {
         return Err(
-            "FLOW_API_URL missing. Deploy cloud/ to MyGCP and set FLOW_API_URL in voice-flow/.env."
-                .into(),
+            "FLOW_API_URL missing. Run cloud/deploy.sh, or switch Processing mode to local.".into(),
         );
     }
     if key.is_empty() {
         return Err(
-            "FLOW_API_KEY missing. Import from Secret Manager flow-api-key or re-run cloud/deploy.sh."
+            "FLOW_API_KEY missing. Re-run cloud/deploy.sh, or switch Processing mode to local."
                 .into(),
         );
     }
@@ -89,20 +98,16 @@ pub async fn health(config: &AppConfig) -> Result<String, String> {
         .send()
         .await
         .map_err(|e| describe_network_error("Cloud Run", &base, &e))?;
-    // health is public; key optional — still check reachability
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(format!("Cloud Run health failed ({status}): {body}"));
     }
     let body = response.text().await.unwrap_or_default();
-    Ok(format!("MyGCP Flow API OK — {body}"))
+    Ok(format!("Flow Cloud API OK — {body}"))
 }
 
-pub async fn transcribe(
-    config: &AppConfig,
-    audio_base64: &str,
-) -> Result<String, String> {
+pub async fn transcribe(config: &AppConfig, audio_base64: &str) -> Result<String, String> {
     let (base, key) = ensure_cloud(config)?;
     let client = cloud_client()?;
     let response = client
@@ -111,6 +116,11 @@ pub async fn transcribe(
         .json(&json!({
             "audio_base64": audio_base64,
             "language": config.language,
+            "dictionary": crate::store::load_store()
+                .dictionary
+                .iter()
+                .map(|entry| entry.word.clone())
+                .collect::<Vec<_>>(),
         }))
         .send()
         .await
@@ -135,7 +145,7 @@ pub async fn transcribe(
 pub async fn process(
     config: &AppConfig,
     payload: ProcessPayload<'_>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<ProcessResult, String> {
     let (base, key) = ensure_cloud(config)?;
     let client = cloud_client()?;
     let response = client
@@ -159,7 +169,11 @@ pub async fn process(
     if parsed.text.trim().is_empty() {
         return Err("Cloud process returned empty text.".into());
     }
-    Ok((parsed.text, parsed.raw_transcript))
+    Ok(ProcessResult {
+        text: parsed.text,
+        raw_transcript: parsed.raw_transcript,
+        trace: parsed.trace.unwrap_or_default(),
+    })
 }
 
 /// Transcribes one meeting-audio chunk. Reuses `TextResponse` — `raw_transcript` is simply left
@@ -181,6 +195,11 @@ pub async fn meeting_transcribe(
             "speaker": speaker,
             "session_id": session_id,
             "language": config.language,
+            "dictionary": crate::store::load_store()
+                .dictionary
+                .iter()
+                .map(|entry| entry.word.clone())
+                .collect::<Vec<_>>(),
         }))
         .send()
         .await
@@ -208,6 +227,65 @@ pub async fn meeting_transcribe(
     Ok(parsed.text)
 }
 
+pub fn processing_mode(config: &AppConfig) -> &'static str {
+    match config.processing_mode.trim().to_ascii_lowercase().as_str() {
+        "cloud" => "cloud",
+        "hybrid" => "hybrid",
+        _ => "local",
+    }
+}
+
+/// Full Cloud Run path: STT and LLM both run on `flow-api`.
 pub fn uses_cloud(config: &AppConfig) -> bool {
-    config.processing_mode.trim().eq_ignore_ascii_case("cloud")
+    processing_mode(config) == "cloud"
+}
+
+/// Cloud or hybrid: cleanup / prompts / answers run on Cloud Run.
+pub fn uses_cloud_llm(config: &AppConfig) -> bool {
+    matches!(processing_mode(config), "cloud" | "hybrid")
+}
+
+/// Local or hybrid: speech is transcribed on the Mac.
+pub fn uses_local_stt(config: &AppConfig) -> bool {
+    matches!(processing_mode(config), "local" | "hybrid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    fn cfg(mode: &str) -> AppConfig {
+        AppConfig {
+            processing_mode: mode.into(),
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn local_mode_keeps_stt_and_llm_on_the_mac() {
+        let config = cfg("local");
+        assert_eq!(processing_mode(&config), "local");
+        assert!(!uses_cloud(&config));
+        assert!(!uses_cloud_llm(&config));
+        assert!(uses_local_stt(&config));
+    }
+
+    #[test]
+    fn cloud_mode_sends_stt_and_llm_to_cloud_run() {
+        let config = cfg("CLOUD");
+        assert_eq!(processing_mode(&config), "cloud");
+        assert!(uses_cloud(&config));
+        assert!(uses_cloud_llm(&config));
+        assert!(!uses_local_stt(&config));
+    }
+
+    #[test]
+    fn hybrid_mode_is_local_stt_plus_cloud_llm() {
+        let config = cfg("hybrid");
+        assert_eq!(processing_mode(&config), "hybrid");
+        assert!(!uses_cloud(&config));
+        assert!(uses_cloud_llm(&config));
+        assert!(uses_local_stt(&config));
+    }
 }

@@ -12,7 +12,7 @@ type CFStringRef = *const c_void;
 type CFTypeID = usize;
 type CFTypeRef = *const c_void;
 type Boolean = u8;
-type pid_t = i32;
+type PidT = i32;
 type AXError = i32;
 type AXValueType = u32;
 
@@ -28,7 +28,7 @@ struct CFRange {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn AXUIElementCreateApplication(pid: pid_t) -> AXUIElementRef;
+    fn AXUIElementCreateApplication(pid: PidT) -> AXUIElementRef;
     fn AXUIElementGetTypeID() -> CFTypeID;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -90,7 +90,7 @@ impl Drop for CfType {
 }
 
 pub fn insert_text_into_focused_element(pid: i32, text: &str) -> Result<(), String> {
-    let app = unsafe { AXUIElementCreateApplication(pid as pid_t) };
+    let app = unsafe { AXUIElementCreateApplication(pid as PidT) };
     if app.is_null() {
         return Err("Could not create accessibility handle for target app.".into());
     }
@@ -110,7 +110,13 @@ pub fn insert_text_into_focused_element(pid: i32, text: &str) -> Result<(), Stri
     let updated_value = splice_text(&current_value, insert_range, text)?;
 
     let updated_cf = cfstring(&updated_value)?;
-    let set_err = unsafe { AXUIElementSetAttributeValue(element, cfstring_attr("AXValue")?.as_ptr(), updated_cf.as_ptr()) };
+    let set_err = unsafe {
+        AXUIElementSetAttributeValue(
+            element,
+            cfstring_attr("AXValue")?.as_ptr(),
+            updated_cf.as_ptr(),
+        )
+    };
     if set_err != 0 {
         return Err(format!(
             "Focused field rejected AX text insertion (AXValue set error {}).",
@@ -123,7 +129,12 @@ pub fn insert_text_into_focused_element(pid: i32, text: &str) -> Result<(), Stri
         length: 0,
     };
     if ensure_settable(element, "AXSelectedTextRange").is_ok() {
-        let range_value = unsafe { AXValueCreate(K_AX_VALUE_CF_RANGE_TYPE, &new_cursor as *const _ as *const c_void) };
+        let range_value = unsafe {
+            AXValueCreate(
+                K_AX_VALUE_CF_RANGE_TYPE,
+                &new_cursor as *const _ as *const c_void,
+            )
+        };
         if !range_value.is_null() {
             let range_value = CfType(range_value);
             let _ = unsafe {
@@ -143,7 +154,7 @@ pub fn insert_text_into_focused_element(pid: i32, text: &str) -> Result<(), Stri
 /// Electron apps (Cursor, WhatsApp) often fail Cmd+V silently when nothing is focused;
 /// osascript still returns success, so callers must check this first.
 pub fn has_focused_input_target(pid: i32) -> Result<(), String> {
-    let app = unsafe { AXUIElementCreateApplication(pid as pid_t) };
+    let app = unsafe { AXUIElementCreateApplication(pid as PidT) };
     if app.is_null() {
         return Err("Could not create accessibility handle for target app.".into());
     }
@@ -153,7 +164,9 @@ pub fn has_focused_input_target(pid: i32) -> Result<(), String> {
     })?;
     let element = focused.as_ptr();
     if unsafe { CFGetTypeID(element) } != unsafe { AXUIElementGetTypeID() } {
-        return Err("Focused UI element is not a text input. Click the message field first.".into());
+        return Err(
+            "Focused UI element is not a text input. Click the message field first.".into(),
+        );
     }
 
     // Prefer elements that look like text inputs. Some Electron composers expose a
@@ -181,7 +194,10 @@ pub fn has_focused_input_target(pid: i32) -> Result<(), String> {
     ))
 }
 
-fn resolve_insert_range(current_value: &str, selected_range: Option<CFRange>) -> Result<CFRange, String> {
+fn resolve_insert_range(
+    current_value: &str,
+    selected_range: Option<CFRange>,
+) -> Result<CFRange, String> {
     if let Some(range) = selected_range {
         if range.location < 0 || range.length < 0 {
             return Err("Focused field returned an invalid selection range.".into());
@@ -194,7 +210,10 @@ fn resolve_insert_range(current_value: &str, selected_range: Option<CFRange>) ->
     }
 
     if current_value.is_empty() {
-        return Ok(CFRange { location: 0, length: 0 });
+        return Ok(CFRange {
+            location: 0,
+            length: 0,
+        });
     }
 
     Err("Focused field does not expose a writable selection range for direct AX insertion.".into())
@@ -246,7 +265,10 @@ fn copy_selected_range(element: AXUIElementRef) -> Result<CFRange, String> {
         return Err("Focused field returned a non-range AXSelectedTextRange value.".into());
     }
 
-    let mut range = CFRange { location: 0, length: 0 };
+    let mut range = CFRange {
+        location: 0,
+        length: 0,
+    };
     let ok = unsafe {
         AXValueGetValue(
             raw.as_ptr() as AXValueRef,
@@ -260,7 +282,10 @@ fn copy_selected_range(element: AXUIElementRef) -> Result<CFRange, String> {
     Ok(range)
 }
 
-fn copy_optional_string_attribute(element: AXUIElementRef, attr: &str) -> Result<Option<String>, String> {
+fn copy_optional_string_attribute(
+    element: AXUIElementRef,
+    attr: &str,
+) -> Result<Option<String>, String> {
     let attr_cf = cfstring_attr(attr)?;
     let mut value: CFTypeRef = ptr::null();
     let err = unsafe { AXUIElementCopyAttributeValue(element, attr_cf.as_ptr(), &mut value) };
@@ -285,16 +310,17 @@ fn copy_attribute(element: AXUIElementRef, attr: &str) -> Result<CfType, String>
     if err != 0 || value.is_null() {
         return Err(format!(
             "Accessibility attribute {} was unavailable (error {}).",
-            attr,
-            err
+            attr, err
         ));
     }
     Ok(CfType(value))
 }
 
 fn cfstring(value: &str) -> Result<CfType, String> {
-    let cstr = CString::new(value).map_err(|_| "Text contained an unexpected NUL byte.".to_string())?;
-    let raw = unsafe { CFStringCreateWithCString(ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8) };
+    let cstr =
+        CString::new(value).map_err(|_| "Text contained an unexpected NUL byte.".to_string())?;
+    let raw =
+        unsafe { CFStringCreateWithCString(ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8) };
     if raw.is_null() {
         return Err("Could not allocate CoreFoundation string.".into());
     }
@@ -324,7 +350,8 @@ fn cfstring_to_string(value: CFStringRef) -> Result<String, String> {
         return Err("Could not decode CoreFoundation string as UTF-8.".into());
     }
     let nul = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    String::from_utf8(buf[..nul].to_vec()).map_err(|_| "Focused field value was not valid UTF-8.".into())
+    String::from_utf8(buf[..nul].to_vec())
+        .map_err(|_| "Focused field value was not valid UTF-8.".into())
 }
 
 fn attr_name(_attr: CFTypeRef) -> &'static str {
@@ -344,7 +371,7 @@ pub fn click_composer_area_offset(pid: i32, x_frac: f64, y_frac: f64) -> Result<
 }
 
 pub fn front_window_bounds(pid: i32) -> Result<(f64, f64, f64, f64), String> {
-    let app = unsafe { AXUIElementCreateApplication(pid as pid_t) };
+    let app = unsafe { AXUIElementCreateApplication(pid as PidT) };
     if app.is_null() {
         return Err("Could not create accessibility handle for target app.".into());
     }
@@ -376,7 +403,8 @@ fn ax_point(value: CFTypeRef) -> Result<(f64, f64), String> {
         y: f64,
     }
     let mut point = CGPoint { x: 0.0, y: 0.0 };
-    let ok = unsafe { AXValueGetValue(value as AXValueRef, 1, &mut point as *mut _ as *mut c_void) };
+    let ok =
+        unsafe { AXValueGetValue(value as AXValueRef, 1, &mut point as *mut _ as *mut c_void) };
     if ok == 0 {
         return Err("Could not decode AXPosition.".into());
     }

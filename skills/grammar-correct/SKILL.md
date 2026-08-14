@@ -1,10 +1,11 @@
 # Skill: grammar-correct
 
-Automatically corrects grammar of transcribed text before prompt generation.
+Corrects grammar, spelling, punctuation, and capitalization in the current text.
 
 ## Trigger
 
-Runs after speech-to-text on **Control+1**.
+Runs on **fn+2** after Flow captures the current field text. Prompt generation on **fn+1**
+still performs its own cleanup before producing a Vibe Coding prompt.
 
 ## Implementation
 
@@ -23,4 +24,4 @@ Runs after speech-to-text on **Control+1**.
 
 ## Output
 
-Clean written English preserving proper nouns and meaning, ready to feed into `vibe-prompt`.
+Clean written English preserving proper nouns and meaning, pasted back into the active field.
