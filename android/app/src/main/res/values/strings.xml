@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Android Flow</string>
-    <string name="accessibility_service_description">Android Flow uses Accessibility to read the focused text field and insert dictation, vibe prompts, and grammar fixes. It does not browse your screen beyond the focused editable field.</string>
+    <string name="app_name">Sprout</string>
+    <string name="accessibility_service_description">Sprout uses Accessibility to read the focused text field and insert dictation, vibe prompts, and grammar fixes. It does not browse your screen beyond the focused editable field.</string>
     <string name="bubble_notification_channel">Floating bubble</string>
-    <string name="bubble_notification_title">Android Flow is ready</string>
+    <string name="bubble_notification_title">Sprout is ready</string>
     <string name="bubble_notification_text">Hold the bubble to dictate into the focused app.</string>
 
     <string name="hub_tagline">Speak into any app. Hold the bubble to dictate. Tap for vibe prompts and grammar.</string>
@@ -16,7 +16,7 @@
     <string name="hub_play_note">Privacy: https://shahaman098.github.io/android-flow/privacy.html — enable GitHub Pages on the docs/ folder if that link 404s.</string>
     <string name="hub_privacy_link">Privacy policy</string>
     <string name="mic_disclosure_title">Microphone</string>
-    <string name="mic_disclosure_body">Android Flow records audio only while you hold the bubble. That audio is sent to the flow-api URL you configured so it can transcribe your speech. Recordings are not stored in the app.</string>
+    <string name="mic_disclosure_body">Sprout records audio only while you hold the bubble. That audio is sent to the flow-api URL you configured so it can transcribe your speech. Recordings are not stored in the app.</string>
     <string name="mic_disclosure_continue">Continue</string>
     <string name="mic_disclosure_cancel">Not now</string>
 
@@ -50,6 +50,5 @@
     <string name="bubble_too_short">Too short — hold longer</string>
     <string name="bubble_need_a11y">Enable Accessibility</string>
     <string name="bubble_need_text">Focus a field with text</string>
-    <string name="bubble_copied_a11y">Copied — enable Accessibility to auto-insert</string>
-    <string name="bubble_copied_clipboard">Copied to clipboard — paste into the field</string>
+    <string name="bubble_insert_failed">Could not insert into the focused field</string>
 </resources>

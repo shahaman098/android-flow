@@ -1,23 +1,21 @@
 # Skill: speech-to-text
 
-Converts speech input to text via the configured speech provider.
+Converts speech input to text via the configured `flow-api` speech provider.
 
-- **local / hybrid**: Mac STT (`stt_local.rs` — whisper.cpp, Groq, or GCP)
-- **cloud**: Cloud Run `/v1/transcribe` (Groq by default)
+- **Android:** floating bubble records PCM/WAV and sends it to Cloud Run `/v1/process` (`mode=dictate`)
+- **cloud STT:** Groq `whisper-large-v3-turbo` by default (`STT_PROVIDER=gcp_speech` is an explicit deploy choice)
 
 ## Trigger
 
-Recording session started by holding **fn**.
+Recording session started by **holding the floating bubble**.
 
 ## Implementation
 
-- Frontend captures audio in ~50s windows (`src/lib/audio.ts`) so providers with a
-  60s sync cap (GCP Speech) never see one giant blob
-- Backend router: `src-tauri/src/stt_local.rs`
-- Dictionary terms are passed as an STT prompt (Groq / local Whisper) or phrase-set
-  (GCP)
-- After STT, hold `fn` runs light cleanup + snippet expansion unless cleanup is off
-- `[FILL: custom vocabulary]`
+- Mic capture: `android/.../audio/MicRecorder.kt` (16 kHz mono PCM16, wrapped as WAV)
+- Overlay: `android/.../service/BubbleOverlayService.kt` hold-to-talk
+- Insert: `android/.../service/FlowAccessibilityService.kt` into the focused editable field
+- Dictionary terms are passed through to `flow-api` (Groq prompt or GCP phrase-set)
+- After STT, hold-bubble runs light cleanup unless Hub **Light cleanup** is off
 
 ## Output
 

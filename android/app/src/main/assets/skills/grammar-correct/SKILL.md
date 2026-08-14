@@ -4,14 +4,15 @@ Corrects grammar, spelling, punctuation, and capitalization in the current text.
 
 ## Trigger
 
-Runs on **fn+2** after Flow captures the current field text. Prompt generation on **fn+1**
+Runs on bubble **Fix grammar** after Sprout reads the focused field. Bubble **Vibe prompt**
 still performs its own cleanup before producing a Vibe Coding prompt.
 
 ## Implementation
 
-- Cloud mode: `cloud/app/llm.py:polish()`. Local mode: `polish_text()` in
-  `src-tauri/src/dictate.rs`.
-- Model: Qwen2.5-14B via Ollama on MyGCP (`flow-llm` VM), low temperature (deterministic).
+- `cloud/app/llm.py:polish()` via `POST /v1/process` `mode=correct_text`
+- Default cloud LLM: DeepSeek `deepseek-v4-flash`
+- Client: `android/.../service/BubbleOverlayService.kt` → `FlowApiClient.correctText`
+- Insert: `FlowAccessibilityService.insertOrReplaceText`
 
 ## Rules
 
@@ -24,4 +25,4 @@ still performs its own cleanup before producing a Vibe Coding prompt.
 
 ## Output
 
-Clean written English preserving proper nouns and meaning, pasted back into the active field.
+Clean written English preserving proper nouns and meaning, inserted into the focused field.

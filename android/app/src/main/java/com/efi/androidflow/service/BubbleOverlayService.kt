@@ -5,8 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -22,7 +20,6 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.efi.androidflow.FlowApp
 import com.efi.androidflow.R
@@ -278,7 +275,10 @@ class BubbleOverlayService : Service() {
                     if (settings.correctEnglish) result.text
                     else (result.rawTranscript ?: result.text)
                 val a11y = FlowAccessibilityService.instance
-                if (a11y == null) copyFallback(text) else a11y.appendText(text)
+                    ?: throw IllegalStateException(getString(R.string.bubble_need_a11y))
+                if (!a11y.appendText(text)) {
+                    throw IllegalStateException(getString(R.string.bubble_insert_failed))
+                }
                 setState(BubbleState.Idle)
             } catch (e: Exception) {
                 setState(BubbleState.Error, e.message ?: "Dictate failed")
@@ -307,7 +307,9 @@ class BubbleOverlayService : Service() {
                         language = settings.language,
                     )
                 }
-                a11y.insertOrReplaceText(result.text)
+                if (!a11y.insertOrReplaceText(result.text)) {
+                    throw IllegalStateException(getString(R.string.bubble_insert_failed))
+                }
                 setState(BubbleState.Idle)
             } catch (e: Exception) {
                 setState(BubbleState.Error, e.message ?: "Vibe failed")
@@ -330,7 +332,9 @@ class BubbleOverlayService : Service() {
                 val result = withContext(Dispatchers.IO) {
                     client.correctText(selected, settings.language)
                 }
-                a11y.insertOrReplaceText(result.text)
+                if (!a11y.insertOrReplaceText(result.text)) {
+                    throw IllegalStateException(getString(R.string.bubble_insert_failed))
+                }
                 setState(BubbleState.Idle)
             } catch (e: Exception) {
                 setState(BubbleState.Error, e.message ?: "Grammar failed")
@@ -344,12 +348,6 @@ class BubbleOverlayService : Service() {
             delay(3200)
             if (state == BubbleState.Error) setState(BubbleState.Idle)
         }
-    }
-
-    private fun copyFallback(text: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Android Flow", text))
-        Toast.makeText(this, getString(R.string.bubble_copied_a11y), Toast.LENGTH_LONG).show()
     }
 
     private fun buildNotification(): Notification {
