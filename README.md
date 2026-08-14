@@ -1,190 +1,144 @@
-# Flow — Vibe Coding voice prompts
+# Android Flow — Vibe Coding voice prompts
 
-Personal Mac helper for **speech → grammar → Vibe Coding prompts**.
+Android companion for **speech → cleanup → Vibe Coding prompts**.
+Floating bubble + Accessibility insert, powered by shared Cloud Run `flow-api`.
 
-| Shortcut | Pipeline |
+GitHub: [shahaman098/android-flow](https://github.com/shahaman098/android-flow)  
+Mac Flow stays on [shahaman098/wispr-flow](https://github.com/shahaman098/wispr-flow).
+
+| Control | Pipeline |
 |---|---|
-| **hold `fn`** | Speech → STT → light cleanup → snippet expand → paste |
-| **`fn` + `1`** | Select-all current text → load `context/` → **perfect Vibe Coding prompt** → paste |
-| **`fn` + `2`** | Select-all current text → grammar/spelling cleanup → paste |
-| **`fn` + `3`** | Answer the latest question detected in the live conversation transcript → paste |
+| **Hold bubble** | Speech → STT → light cleanup → insert into focused field |
+| **Tap bubble → Vibe prompt** | Read focused text → load `context/` + constitution → perfect Vibe Coding prompt → replace |
+| **Tap bubble → Fix grammar** | Read focused text → grammar/spelling cleanup → replace |
 
-`fn` (the Globe key) is the primary control. Hold `fn` to dictate with light
-cleanup (disable in Settings for raw STT). If text is already selected, a short
-spoken command edits that range. `fn+1` turns the current text into a Vibe
-Coding prompt, `fn+2` corrects the current field, and `fn+3` answers the latest
-detected live-conversation question.
-
-Do not change the intended meaning of these shortcuts.
+**Languages:** English · हिन्दी · नेपाली — pick in Hub (UI + speech + LLM output).
 
 ## Folder hierarchy
 
 ```text
-Wispr Flow/
+Android Flow/
+├── android/                    # Kotlin + Jetpack Compose app
+│   └── app/
+├── cloud/                      # Shared flow-api (Cloud Run)
 ├── constitutions/
-│   └── vibe-coding.md          # Rules for prompt generation
+│   └── vibe-coding.md
 ├── context/
-│   ├── README.md
-│   └── project.md              # Project facts for fn+1 prompt generation
+│   └── project.md
 ├── skills/
-│   ├── README.md
-│   ├── speech-to-text/SKILL.md
-│   ├── grammar-correct/SKILL.md
-│   └── vibe-prompt/SKILL.md    # fn+1
-├── src/                        # React Hub + bubble UI
-└── src-tauri/src/
-    ├── stt_groq.rs             # Speech-to-text (Groq)
-    ├── stt_gcp.rs              # Speech-to-text fallback (GCP)
-    ├── dictate.rs              # Light-cleaned dictation + prompt/correction/answer transforms
-    ├── vibe_context.rs         # Loads context/, skills/, constitutions/
-    └── focus.rs                # Select-all / paste into target app
+│   ├── speech-to-text/
+│   ├── grammar-correct/
+│   └── vibe-prompt/
+├── docs/cloud-hosting.md
+└── PRIVACY.md
 ```
 
-`[FILL: add more context/*.md as the project grows]`
+## Run on your phone
 
-## Providers
+### Option A — Android Studio
 
-| Stage | Where |
-|---|---|
-| Mic + paste | Always local in Mac Flow.app |
-| Local | Mac STT (whisper.cpp or Groq) + Mac LLM (DeepSeek / xAI) |
-| Hybrid | Mac STT + Cloud Run LLM (`flow-api` `/v1/process` with transcript, no audio) |
-| Cloud | Mac records/pastes only → Cloud Run STT + LLM |
+1. Open the `android/` folder in Android Studio.
+2. Connect a phone with USB debugging (or wireless debugging).
+3. Run **app** (debug).
 
-Fresh installs default to local unless `FLOW_API_URL` and `FLOW_API_KEY` are already
-configured. Cloud deploys set `PROCESSING_MODE=cloud` automatically. Switch to hybrid
-in **Hub → Settings** to keep speech on the Mac while using Cloud Run for cleanup and
-prompts.
+### Option B — CLI
 
-### Local mode
+Requires **JDK 17 or 21** (Homebrew JDK 26 breaks the Android Gradle Plugin).
 
 ```bash
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+export PATH="$JAVA_HOME/bin:$HOME/Library/Android/sdk/platform-tools:$PATH"
+cd android
+./gradlew :app:installDebug
+```
+
+APK path after build:
+
+`android/app/build/outputs/apk/debug/app-debug.apk`
+
+### First-launch checklist (in Hub)
+
+1. Allow **Microphone**
+2. Allow **Display over other apps** (floating bubble)
+3. Enable **Android Flow** under **Accessibility**
+4. Paste `FLOW_API_URL` + `FLOW_API_KEY` → **Save** → **Test API**
+5. Tap **Launch floating bubble**
+
+Then open Notes/Messages, focus a field, **hold** the teal bubble to dictate.
+
+## Cloud API
+
+The Android client talks only to `flow-api`:
+
+- `POST /v1/process` with `mode=dictate | vibe_text | correct_text`
+- Auth: `Authorization: Bearer FLOW_API_KEY`
+
+### Deploy Cloud Run (billing must be enabled)
+
+See [docs/cloud-hosting.md](docs/cloud-hosting.md). Billing on the GCP project is currently
+disabled — re-link billing before deploy, or use local API for device testing.
+
+```bash
+export GROQ_API_KEY=...
 export DEEPSEEK_API_KEY=...
-bash scripts/configure-local.sh
-pnpm start
-```
-
-The Mac records, transcribes, and pastes locally, then calls DeepSeek for cleanup/prompting. No
-Cloud Run, GCP billing, or STT API key is required for this mode.
-
-Prerequisites:
-
-```bash
-brew install whisper-cpp ffmpeg
-mkdir -p "$HOME/Library/Application Support/voice-flow/models"
-curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
-  -o "$HOME/Library/Application Support/voice-flow/models/ggml-small.en.bin"
-```
-
-Optional low-CPU Groq STT instead of local Whisper:
-
-```bash
-export STT_PROVIDER=groq_whisper
-export GROQ_API_KEY=...
-bash scripts/configure-local.sh
-```
-
-Optional xAI/Grok LLM instead of DeepSeek:
-
-```bash
-export LLM_PROVIDER=xai
-export XAI_API_KEY=...
-bash scripts/configure-local.sh
-```
-
-### Hybrid mode
-
-Set `PROCESSING_MODE=hybrid` (or pick **Hybrid** in Hub Settings) when Cloud Run is
-deployed and you still want Mac speech. Dictation transcribes locally, then sends the
-transcript to Cloud Run for light cleanup, vibe prompts, grammar, and spoken edits.
-Meetings stay on local STT.
-
-```bash
-# After cloud/deploy.sh has written FLOW_API_*
-# Hub → Settings → Processing mode → Hybrid
-```
-
-### Cloud mode
-
-`cloud/deploy.sh` deploys the same processing pipeline behind Cloud Run, then writes the live API
-URL and key into
-`~/Library/Application Support/voice-flow/.env`, and Flow copies them into `config.json`
-on first run. Both are editable afterwards in **Hub → Settings**, which is authoritative —
-the `.env` values only fill in fields that are still blank.
-
-The default deployment scales Cloud Run to zero and does not create the old `flow-llm`
-Compute Engine VM. Add `GROQ_API_KEY` and `DEEPSEEK_API_KEY` to the app `.env` before
-deploying; use `STT_PROVIDER=gcp_speech bash cloud/deploy.sh` only if you deliberately
-want the more expensive GCP Speech fallback.
-
-```bash
-gcloud config set account sahkris0844@gmail.com
-gcloud config set project project-ced3b331-e814-4d72-8bc
-bash cloud/deploy.sh   # deploy / refresh Cloud Run + local FLOW_API_* keys
-```
-
-Mac keeps only mic/paste; STT and prompt processing run through Cloud Run
-(`PROCESSING_MODE=cloud`).
-
-Optional xAI/Grok Cloud Run deploy:
-
-```bash
-export GROQ_API_KEY=...
-export LLM_PROVIDER=xai
-export XAI_API_KEY=...
 bash cloud/deploy.sh
 ```
 
-## Run
+Enter the printed `FLOW_API_URL` / `FLOW_API_KEY` in the Hub.
+
+### Local API for phone testing (no Cloud Run)
+
+On your Mac (same Wi‑Fi as the phone):
 
 ```bash
-pnpm install
-pnpm start
+cd cloud
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+export GROQ_API_KEY=...
+export DEEPSEEK_API_KEY=...
+export FLOW_API_KEY=dev-local-key
+uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-`pnpm start` builds, code-signs, and installs to `/Applications/Flow.app`.
+In Hub settings set:
 
-Requires Xcode or the Command Line Tools (`xcode-select --install`) — the meeting-capture
-path links against Swift via ScreenCaptureKit. `src-tauri/build.rs` locates the Swift
-compatibility archives itself, so a Command Line Tools-only machine links correctly; set
-`DEVELOPER_DIR` if your toolchain lives somewhere non-standard.
+```text
+FLOW_API_URL=http://YOUR_MAC_LAN_IP:8080
+FLOW_API_KEY=dev-local-key
+```
 
-Development and checks:
+Debug builds allow cleartext HTTP for this LAN path.
+
+## Play Store / marketing prep
+
+- Application id: `com.efi.androidflow`
+- Version: `1.0.0` (versionCode 1)
+- Privacy: [PRIVACY.md](PRIVACY.md) and hosted page `https://shahaman098.github.io/android-flow/privacy.html`
+- Console copy-paste: [docs/play-store.md](docs/play-store.md)
+- Listing assets: `store/icon-512.png`, `store/feature-graphic.png`
+- Release bundle (JDK 21, after `android/keystore.properties` exists):
 
 ```bash
-pnpm dev
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+cd android
+./gradlew :app:bundleRelease
 ```
 
-```bash
-pnpm check
-```
+AAB: `android/app/build/outputs/bundle/release/app-release.aab`
 
-`pnpm check` typechecks the frontend and runs the Rust unit tests.
+**Back up** `android/app/flow-release.jks` and `android/keystore.properties`. They are gitignored. Losing them blocks Play updates.
 
-### Accessibility (required — `fn` does nothing without it)
+Listing checklist:
 
-The `fn` hotkey uses a CGEventTap, which macOS refuses to create unless the app is
-trusted for Accessibility. Grant it **once**, against `/Applications/Flow.app`:
+- [ ] GitHub Pages on `android-flow`: `.github/workflows/pages.yml` deploys `/docs` after push to `main`
+- [x] Privacy contact: sahkris0844@gmail.com
+- [ ] Phone screenshots uploaded (Hub + bubble over Notes)
+- [ ] Feature graphic and 512 icon from `store/`
+- [ ] Data safety + Accessibility declarations from docs/play-store.md
+- [ ] Content rating questionnaire
 
-> System Settings → Privacy & Security → Accessibility → **+** → `/Applications/Flow.app`
+## Stack
 
-Delete any older `Flow` rows there first; stale entries point at a different
-signature and silently block the new one.
-
-The build signs with a real Apple Development identity so the designated
-requirement is `identifier "com.efi.voiceflow" and anchor apple generic and …`
-— no cdhash — which is why the approval now survives every rebuild. An ad-hoc
-(linker-signed) bundle has no designated requirement at all, so macOS could not
-record the grant and `AXIsProcessTrusted()` stayed false forever.
-
-Check it took: `/tmp/flow-section.log` should read `AXIsProcessTrusted=true`
-followed by `CGEventTapCreate OK`.
-
-## Checklist
-
-- [x] Speech-to-text (`stt_gcp.rs` + `skills/speech-to-text`)
-- [x] fn+1 Vibe prompt from current text (`vibe_text` mode + `skills/vibe-prompt`)
-- [x] fn+2 text correction (`correct_text` mode + `skills/grammar-correct`)
-- [x] fn+3 live conversation question answering (`meeting_answer` mode)
-- [x] Folder structure `context/`, `skills/`, `constitutions/`
-- [x] Inline comments on each component
+- **UI language:** Kotlin + Jetpack Compose (Material 3) — native overlays, Accessibility, and Play performance
+- **Backend:** FastAPI `cloud/` on Cloud Run
+- **Prompt assets:** `constitutions/`, `context/`, `skills/` (bundled into the APK as assets)

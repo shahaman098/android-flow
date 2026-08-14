@@ -78,7 +78,7 @@ async def root() -> dict:
             "transcribe": "POST /v1/transcribe",
             "process": "POST /v1/process",
         },
-        "note": "Mac Flow.app calls these with Bearer FLOW_API_KEY. Opening / in a browser is fine.",
+        "note": "Android Flow (and other clients) call these with Bearer FLOW_API_KEY. Opening / in a browser is fine.",
     }
 
 

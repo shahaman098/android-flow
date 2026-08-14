@@ -1,12 +1,12 @@
 # skills/
 
-Capability definitions for the Vibe Coding feature set.
+Capability definitions for Android Flow.
 
 | Skill | Role |
 |---|---|
 | `speech-to-text` | Convert microphone audio to text |
-| `grammar-correct` | fn+2 — correct current text |
-| `vibe-prompt` | fn+1 — perfect Vibe Coding prompt |
-| `meeting-transcript` | Consent-gated meeting transcription (mic + system audio) |
+| `grammar-correct` | Bubble → Fix grammar |
+| `vibe-prompt` | Bubble → Vibe prompt |
+| `meeting-transcript` | Deferred on Android (Mac-era meeting capture) |
 
 `[FILL: add more skills as the product grows]`

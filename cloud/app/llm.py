@@ -25,6 +25,28 @@ from .settings import settings
 logger = logging.getLogger(__name__)
 
 
+def language_directive(language: str | None) -> str:
+    """Turn a short language code into an explicit LLM instruction."""
+    raw = (language or settings.default_language or "en").strip().lower().replace("_", "-")
+    code = raw.split("-", 1)[0] if raw else "en"
+    if code in ("hi",):
+        return (
+            "Write the output in fluent Hindi (हिन्दी), preferably Devanagari. "
+            "If the user mixed Hindi and English (Hinglish), preserve that mix. "
+            f"Language preference code: {language or 'hi'}"
+        )
+    if code in ("ne",):
+        return (
+            "Write the output in fluent Nepali (नेपाली), preferably Devanagari. "
+            "If the user mixed Nepali and English, preserve that mix. "
+            f"Language preference code: {language or 'ne'}"
+        )
+    return (
+        "Write the output in clear English matching the user's dialect. "
+        f"Language preference code: {language or 'en'}"
+    )
+
+
 @dataclass
 class GenerationTrace:
     """Structured record of one LLM pass, for training and mistake review."""
@@ -665,7 +687,7 @@ Detected problems:
 
 Return ONLY the corrected final prompt text. No preamble, no explanation of what you changed,
 no wrapping quotes or code fences.
-Language preference code: {language}"""
+{language_directive(language)}"""
     user = f"DRAFT:\n\n{draft}\n\n---\nAdditional context to weave in if relevant:\n{extra_context or 'none'}"
     fixed = await chat(system, user, temperature=0.1, timeout=45.0, max_tokens=REPAIR_PROMPT_MAX_TOKENS)
     return _strip_wrapper(fixed)
@@ -753,7 +775,7 @@ Rules:
 - Do not add greetings, explanations, or quotes
 - If unsure whether a change is safe, leave that part unchanged
 - Return only the corrected text
-- Language preference code: {language}
+- {language_directive(language)}
 - Preserve these dictionary terms exactly when present: {dict_words}"""
     result = await chat(system, text, temperature=0.1, max_tokens=500)
     corrected = _strip_wrapper(result)
@@ -797,7 +819,7 @@ Rules:
 - Preserve proper nouns, numbers, paths, and dictionary terms
 - Return only the edited text
 - No preamble, quotes, or explanation
-- Language preference code: {language}
+- {language_directive(language)}
 - Preserve these dictionary terms exactly when present: {dict_words}"""
     user = (
         f"Selected text:\n{selected}\n\n---\nSpoken instruction:\n{instruction}\n\n"
@@ -856,7 +878,7 @@ Rules:
 - Do not invent features beyond the user's rough text and provided project context
 - Keep each section concise; do not pad the output
 - Return ONLY the prompt — no preamble, no wrapping quotes or code fences
-- Language preference code: {language}"""
+- {language_directive(language)}"""
     user = (
         f"Rough text from the active field:\n\n{rough_text}\n\n---\n"
         f"Project context:\n\n{project_context or '[FILL: context/]'}\n\n---\n"
@@ -946,7 +968,7 @@ Rules:
 - Do not invent private facts or commitments not supported by the conversation
 - If the transcript does not contain enough information, give a safe answer that says what is known and what needs checking
 - Return only the answer text, with no preamble, quotes, or explanation
-- Language preference code: {language}"""
+- {language_directive(language)}"""
     user = (
         f"Detected question:\n{question}\n\n---\n"
         f"Recent live conversation transcript:\n{transcript}\n\n---\n"

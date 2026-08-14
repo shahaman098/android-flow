@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy — Android Flow</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 42rem; margin: 2.5rem auto; padding: 0 1.25rem; line-height: 1.55; color: #0b1220; }
+    h1 { font-size: 1.75rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+    th, td { border: 1px solid #cbd5e1; padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #f1f5f9; }
+    a { color: #0f766e; }
+  </style>
+</head>
+<body>
+  <h1>Privacy — Android Flow</h1>
+  <p>Last updated: 2026-08-14</p>
+  <p>Contact: <a href="mailto:sahkris0844@gmail.com">sahkris0844@gmail.com</a></p>
+
+  <h2>What Android Flow is</h2>
+  <p>Android Flow is a dictation and Vibe Coding helper. A floating bubble records your voice and inserts text into the app you are using. You configure your own <code>flow-api</code> URL and API key. The Play Store listing does not include a hosted Flow backend.</p>
+
+  <h2>Data we process</h2>
+  <table>
+    <thead>
+      <tr><th>Data</th><th>Why</th><th>Where</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Microphone audio</td>
+        <td>Speech-to-text for dictation</td>
+        <td>Sent to the HTTPS <code>flow-api</code> endpoint <strong>you</strong> configure, then discarded by the Android client</td>
+      </tr>
+      <tr>
+        <td>Focused text field contents</td>
+        <td>Vibe prompt and grammar correction</td>
+        <td>Sent to that same <code>flow-api</code> for LLM processing</td>
+      </tr>
+      <tr>
+        <td>API URL and API key</td>
+        <td>Authenticate to your backend</td>
+        <td>Stored only on-device (Android DataStore)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>The Android app does not operate a default cloud. If you run <code>flow-api</code> yourself (for example Cloud Run with Groq STT and DeepSeek LLM), <strong>you</strong> are the operator of that backend and those providers process audio/text under <strong>your</strong> accounts.</p>
+
+  <h2>Permissions</h2>
+  <ul>
+    <li><strong>Microphone</strong> — record dictation audio after an in-app disclosure</li>
+    <li><strong>Display over other apps</strong> — floating control bubble</li>
+    <li><strong>Accessibility</strong> — read the focused editable field and insert results. Not used to scrape unrelated screen content</li>
+    <li><strong>Internet</strong> — call your <code>flow-api</code> over HTTPS in release builds</li>
+    <li><strong>Notifications</strong> — foreground service status while the bubble runs</li>
+  </ul>
+
+  <h2>What we do not do</h2>
+  <ul>
+    <li>No account system</li>
+    <li>No analytics SDK</li>
+    <li>No advertising identifiers</li>
+    <li>No sale of audio or transcripts</li>
+    <li>No reading of non-editable or non-focused UI beyond finding the active field</li>
+  </ul>
+
+  <h2>Retention</h2>
+  <p>The Android client does not keep recordings. Audio and field text live only long enough to send the request. Retention on <code>flow-api</code> and third-party STT/LLM providers is controlled by whoever operates that API.</p>
+</body>
+</html>

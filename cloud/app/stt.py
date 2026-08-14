@@ -33,12 +33,17 @@ def _access_token() -> str:
 
 def language_bcp47(language: str | None) -> str:
     lang = (language or settings.default_language).strip()
-    if lang in ("", "auto", "en"):
+    raw = lang.lower().replace("_", "-")
+    if raw in ("", "auto", "en"):
         return "en-GB"
-    if lang.lower() in ("en-us", "en_us"):
+    if raw in ("en-us",):
         return "en-US"
-    if lang.lower() in ("en-gb", "en_gb"):
+    if raw in ("en-gb",):
         return "en-GB"
+    if raw in ("hi", "hi-in"):
+        return "hi-IN"
+    if raw in ("ne", "ne-np"):
+        return "ne-NP"
     if "-" in lang:
         return lang
     return lang

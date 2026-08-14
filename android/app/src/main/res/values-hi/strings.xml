@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android Flow</string>
+    <string name="accessibility_service_description">Android Flow ऐक्सेसिबिलिटी का उपयोग करके फोकस किए गए टेक्स्ट फ़ील्ड को पढ़ता है और डिक्टेशन, वाइब प्रॉम्प्ट तथा व्याकरण सुधार डालता है। यह फोकस किए गए संपादन योग्य फ़ील्ड के अलावा आपकी स्क्रीन नहीं देखता।</string>
+    <string name="bubble_notification_channel">फ्लोटिंग बबल</string>
+    <string name="bubble_notification_title">Android Flow तैयार है</string>
+    <string name="bubble_notification_text">फोकस किए गए ऐप में डिक्टेट करने के लिए बबल को दबाकर रखें।</string>
+
+    <string name="hub_tagline">किसी भी ऐप में बोलें। डिक्टेट करने के लिए बबल दबाकर रखें। वाइब प्रॉम्प्ट और व्याकरण के लिए टैप करें।</string>
+    <string name="hub_get_ready">शुरू करें</string>
+    <string name="hub_permission_mic">माइक्रोफ़ोन</string>
+    <string name="hub_permission_overlay">फ्लोटिंग बबल</string>
+    <string name="hub_permission_a11y">ऐक्सेसिबिलिटी इनसर्ट</string>
+    <string name="hub_permission_api">आपका flow-api</string>
+    <string name="hub_api_required">अपना FLOW_API_URL और FLOW_API_KEY डालें। इस ऐप में होस्टेड बैकएंड शामिल नहीं है।</string>
+    <string name="hub_play_note">गोपनीयता: https://shahaman098.github.io/android-flow/privacy.html</string>
+    <string name="hub_privacy_link">गोपनीयता नीति</string>
+    <string name="mic_disclosure_title">माइक्रोफ़ोन</string>
+    <string name="mic_disclosure_body">Android Flow केवल तब ऑडियो रिकॉर्ड करता है जब आप बबल दबाकर रखते हैं। वह ऑडियो आपके सेट किए गए flow-api पर भेजा जाता है ताकि बोली को टेक्स्ट बनाया जा सके। ऐप रिकॉर्डिंग नहीं रखता।</string>
+    <string name="mic_disclosure_continue">जारी रखें</string>
+    <string name="mic_disclosure_cancel">अभी नहीं</string>
+
+    <string name="hub_enable">चालू करें</string>
+    <string name="hub_connection">कनेक्शन</string>
+    <string name="hub_api_url">FLOW_API_URL</string>
+    <string name="hub_api_key">FLOW_API_KEY</string>
+    <string name="hub_language">भाषा</string>
+    <string name="hub_language_hint">इंटरफ़ेस और बोलचाल — अंग्रेज़ी, हिन्दी या नेपाली</string>
+    <string name="hub_lang_en">English</string>
+    <string name="hub_lang_hi">हिन्दी</string>
+    <string name="hub_lang_ne">नेपाली</string>
+    <string name="hub_cleanup">हल्का सुधार</string>
+    <string name="hub_cleanup_hint">डिक्टेशन में फिलर और विराम चिह्न सुधारें</string>
+    <string name="hub_save">सेव करें</string>
+    <string name="hub_saved">सेव हो गया</string>
+    <string name="hub_test_api">API जाँचें</string>
+    <string name="hub_api_ok">API ठीक है</string>
+    <string name="hub_api_down">API बंद है</string>
+    <string name="hub_bubble">बबल</string>
+    <string name="hub_bubble_hint">बबल दबाकर रखें → डिक्टेट · टैप → वाइब / व्याकरण · खींचकर हिलाएँ</string>
+    <string name="hub_launch_bubble">फ्लोटिंग बबल शुरू करें</string>
+    <string name="hub_stop_bubble">बबल बंद करें</string>
+
+    <string name="bubble_ready">तैयार — डिक्टेट करने के लिए दबाकर रखें</string>
+    <string name="bubble_listening">सुन रहा है…</string>
+    <string name="bubble_processing">प्रोसेस हो रहा है…</string>
+    <string name="bubble_vibe">वाइब प्रॉम्प्ट</string>
+    <string name="bubble_grammar">व्याकरण सुधार</string>
+    <string name="bubble_open_hub">हब खोलें</string>
+    <string name="bubble_too_short">बहुत छोटा — और देर दबाकर रखें</string>
+    <string name="bubble_need_a11y">ऐक्सेसिबिलिटी चालू करें</string>
+    <string name="bubble_need_text">टेक्स्ट वाले फ़ील्ड पर फोकस करें</string>
+    <string name="bubble_copied_a11y">कॉपी हो गया — ऑटो-इनसर्ट के लिए ऐक्सेसिबिलिटी चालू करें</string>
+    <string name="bubble_copied_clipboard">क्लिपबोर्ड पर कॉपी — फ़ील्ड में पेस्ट करें</string>
+</resources>

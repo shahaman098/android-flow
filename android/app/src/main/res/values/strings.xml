@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android Flow</string>
+    <string name="accessibility_service_description">Android Flow uses Accessibility to read the focused text field and insert dictation, vibe prompts, and grammar fixes. It does not browse your screen beyond the focused editable field.</string>
+    <string name="bubble_notification_channel">Floating bubble</string>
+    <string name="bubble_notification_title">Android Flow is ready</string>
+    <string name="bubble_notification_text">Hold the bubble to dictate into the focused app.</string>
+
+    <string name="hub_tagline">Speak into any app. Hold the bubble to dictate. Tap for vibe prompts and grammar.</string>
+    <string name="hub_get_ready">Get ready</string>
+    <string name="hub_permission_mic">Microphone</string>
+    <string name="hub_permission_overlay">Floating bubble</string>
+    <string name="hub_permission_a11y">Accessibility insert</string>
+    <string name="hub_permission_api">Your flow-api</string>
+    <string name="hub_api_required">You must paste your own FLOW_API_URL and FLOW_API_KEY. This app does not include a hosted backend.</string>
+    <string name="hub_play_note">Privacy: https://shahaman098.github.io/android-flow/privacy.html — enable GitHub Pages on the docs/ folder if that link 404s.</string>
+    <string name="hub_privacy_link">Privacy policy</string>
+    <string name="mic_disclosure_title">Microphone</string>
+    <string name="mic_disclosure_body">Android Flow records audio only while you hold the bubble. That audio is sent to the flow-api URL you configured so it can transcribe your speech. Recordings are not stored in the app.</string>
+    <string name="mic_disclosure_continue">Continue</string>
+    <string name="mic_disclosure_cancel">Not now</string>
+
+    <string name="hub_enable">Enable</string>
+    <string name="hub_connection">Connection</string>
+    <string name="hub_api_url">FLOW_API_URL</string>
+    <string name="hub_api_key">FLOW_API_KEY</string>
+    <string name="hub_language">Language</string>
+    <string name="hub_language_hint">UI and speech — English, Hindi, or Nepali</string>
+    <string name="hub_lang_en">English</string>
+    <string name="hub_lang_hi">हिन्दी</string>
+    <string name="hub_lang_ne">नेपाली</string>
+    <string name="hub_cleanup">Light cleanup</string>
+    <string name="hub_cleanup_hint">Polish fillers and punctuation on dictate</string>
+    <string name="hub_save">Save</string>
+    <string name="hub_saved">Saved</string>
+    <string name="hub_test_api">Test API</string>
+    <string name="hub_api_ok">API OK</string>
+    <string name="hub_api_down">API down</string>
+    <string name="hub_bubble">Bubble</string>
+    <string name="hub_bubble_hint">Hold bubble → dictate · Tap → vibe / grammar · Drag to move</string>
+    <string name="hub_launch_bubble">Launch floating bubble</string>
+    <string name="hub_stop_bubble">Stop bubble</string>
+
+    <string name="bubble_ready">Ready — hold to dictate</string>
+    <string name="bubble_listening">Listening…</string>
+    <string name="bubble_processing">Processing…</string>
+    <string name="bubble_vibe">Vibe prompt</string>
+    <string name="bubble_grammar">Fix grammar</string>
+    <string name="bubble_open_hub">Open Hub</string>
+    <string name="bubble_too_short">Too short — hold longer</string>
+    <string name="bubble_need_a11y">Enable Accessibility</string>
+    <string name="bubble_need_text">Focus a field with text</string>
+    <string name="bubble_copied_a11y">Copied — enable Accessibility to auto-insert</string>
+    <string name="bubble_copied_clipboard">Copied to clipboard — paste into the field</string>
+</resources>
